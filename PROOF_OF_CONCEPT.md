@@ -23,7 +23,8 @@ Scope of this document is the **first working version only** — levels, streaks
 │                                │  yest.   refactor: drop legacy   │
 │                                │          +12 −240         +732xp │
 └────────────────────────────────┴──────────────────────────────────┘
-  ↑↓/jk move   enter select   a add   d remove   r refresh   q quit
+  ↑↓/jk move   enter select   a add   d remove
+  r refresh   PgUp/PgDn scroll   home newest   q quit
 ```
 
 Left: the repos you've registered, each with its total. Right: the selected repo's recent
@@ -32,18 +33,41 @@ rebase and cherry-pick each take a fresh committer date, and that is the timesta
 Times are relative: `Nm ago` under an hour, `Nh ago` under a day, `yest.` for the previous calendar
 day, `MMM D` beyond that.
 
+The calendar day is the local one, from the offset in the trailing field of `git var
+GIT_COMMITTER_IDENT`, read once at startup and `+0000` where it doesn't resolve. `std` converts to
+UTC alone, and a day reckoned there flips `yest.` three hours into the local day at `+0300`. The
+offset is fixed for the session, so a DST transition moves that boundary by an hour until restart.
+
+A row is labelled by the last component of its path, extended leftward a component at a time only
+where two rows would otherwise read the same — `work/api` and `old/api` rather than two rows of
+`api`.
+
 The `>` marker is the selection, and moving it is what fills the right pane — no enter needed. Enter
 acts on the row it sits on, which only `+ Add repo…` does anything with: it opens the same prompt
-as `a`.
+as `a`. The left pane scrolls to keep the selection in view; a repo added past the bottom would
+otherwise be unreachable to select or remove. The right pane scrolls on `PgUp`/`PgDn` with `home`
+returning to newest, since the stored events run well past a screenful.
 
 Every control is a key. The app enables no mouse capture and reads no mouse events, so a click is
 the terminal's to handle — selecting text across the panes works as it does in any other full-screen
 program. Esc backs out of any prompt, picker or confirm without acting; from the list itself there is
 nothing to back out of, and it does nothing.
 
-A dimmed `!` row is one that can't earn: either its git dir no longer resolves, leaving it
-[stale](#state), or it has no `user.email` to match commits against. It keeps its total either way,
-and the right pane says which.
+The panes split 45/55, with the left one floored at 28 columns and capped at 40 — a total is worth
+more than the tail of a long label, and a repo row is worth more than an empty gutter.
+
+A dimmed `!` row is one that isn't earning: its git dir no longer resolves, leaving it
+[stale](#state); it has no `user.email` to match commits against; or its last scan failed. It keeps
+its total in every case, and the right pane says which in place of the event list:
+
+```
+  this repo has moved or been deleted
+  no user.email is set, so no commit can be matched
+  last scan failed: fatal: not a git repository
+```
+
+A stale repo stays marked until the next start or a re-add. The other two lift on the next scan that
+reaches git.
 
 ## XP rules
 
@@ -52,13 +76,21 @@ and the right pane says which.
   live worktree's path — and never stored, so changing your identity takes effect on the next scan
   with nothing to migrate. Where it resolves to nothing, every commit scores zero, which on screen is
   indistinguishable from having done no work; a repo in that state gets the dimmed `!` and says so.
+  A scan that finds no new candidates ends before that call and leaves the marker as it stands —
+  re-deriving it from a scan that never asked would blink the `!` off a repo that still can't earn,
+  which is most scans.
 - `xp = lines_added × 1 + lines_deleted × 3`. Deleting code is worth more than writing it.
 - A commit whose patch-id has already been recorded — a rebase, amend or cherry-pick of work
   you were already paid for — earns a flat **2 xp** instead. The work counts once; the cleanup
   still counts a little. Patch-ids are tracked per repo, and every non-merge commit a scan scores
   records one whatever it earned: a commit worth zero was still processed, and rewriting it is
   still cleanup.
-- Merge commits are skipped.
+- Merge commits score nothing, take no patch-id and are never listed. Their SHAs are recorded all
+  the same: one left out of `seen_shas` stays a candidate until its reflog entry expires, and every
+  scan until then spends both batched calls to skip it again.
+- The activity pane lists every non-merge commit whose author email matched, whatever it earned — an
+  `--allow-empty` commit renders `+0 −0` and `+0xp`. Another author's commit is scored and recorded
+  but never listed, so a shared repo's pane stays your own work.
 
 ## How it reads git
 
@@ -111,6 +143,13 @@ nothing; text files in the same commit still count.
 and one is enough to abort the scan with `fatal: bad object`. After `--stdin` the flag is accepted
 and does nothing.
 
+A candidate the flag drops is recorded in `seen_shas`, with no patch-id and no event. Objects go
+missing under it where the store is borrowed — `clone --shared`, `--reference`, a hand-written
+`objects/info/alternates` — and the lender prunes them, or where something outside git removes them.
+The reflog entry outlives them by up to `gc.reflogExpire`'s ninety days, and re-minting the work
+would take the original object back, which redoing it does not produce: a fresh commit of the same
+change carries a fresh committer date and so a different SHA.
+
 **3 — patch-ids.** One more batched call, emitting `<patch-id> <sha>` per commit:
 
 ```sh
@@ -132,8 +171,10 @@ the tie-break covers a rebase that stamps several commits with the same second.
 from a spawned thread — feeding stdin and draining stdout from one thread deadlocks as soon as a
 pipe buffer fills.
 
-**When a scan runs.** At startup for every live repo, on a successful add, on `r`, and on the reflog
-events [Liveness](#liveness) describes.
+**When a scan runs.** At startup for every live repo, on a successful add for that repo, on `r` for
+every live repo, and on the reflog events [Liveness](#liveness) describes. `r` covers the whole list
+rather than the selected row: a scan with nothing new costs no git call at all, so scoping it would
+save nothing and leave a missed commit needing a walk down every row to find.
 
 **Where it runs.** On one worker thread — not on the main thread, and not one thread per scan. The
 main thread posts a job per dirty repo; the worker runs the three steps and the scoring and sends
@@ -210,6 +251,13 @@ and no other's, which matters because a lost `seen_patch_ids` makes every commit
 re-mintable at full value.
 
 `version` is per state file, so repos migrate independently.
+
+The storage root is a parameter rather than a lookup: `main` resolves [`--storage`](#binary) where it
+is given and `dirs::data_dir()/git-n-grit` otherwise, then hands the result down, and nothing below
+reaches for it again. Tests need a root apiece — one for a repo's state, another for the whole
+instance lock — and construct it directly in-process, or pass `--storage` to a spawned `gng`.
+Carrying it in the environment instead would serve neither: `std::env::set_var` is `unsafe` in
+edition 2024 and races against every other test in the binary.
 
 **Writing.** Serialize to `<id>.json.tmp` in the same directory, then `fs::rename` it over the
 target. Writing over `<id>.json` in place would open a window where the file is truncated and not yet
@@ -343,7 +391,8 @@ its stored paths and total, then a final "new repo", moved through with ↑↓ a
 abandons the add, registering nothing. The same picker appears where nothing matches but the
 resolved git dir is already registered.
 
-`d` removes the selected row, a stale one included. It confirms first, naming what goes with it:
+`d` removes the selected row, a stale one included. On `+ Add repo…` it does nothing, that row being
+no repo. It confirms first, naming what goes with it:
 
 ```
 ┌ Git-N-Grit ─────────────────────────────────────┐
@@ -388,8 +437,9 @@ scan worker                       ──┘                                     
         └──────────────────── job per dirty repo ─────────────────────────┘
 ```
 
-`notify` already sends into a channel of your choosing — implement its `EventHandler` trait on a
-small forwarder holding the `Sender<AppEvent>`, and it needs no thread of ours. That leaves two
+`notify` already sends into a channel of your choosing — its `EventHandler` is blanket-implemented
+for `FnMut(notify::Result<Event>) + Send`, so a closure holding the `Sender<AppEvent>` is the whole
+forwarder, and it needs no thread of ours. That leaves two
 spawned by hand, the key reader and the scan worker, plus the short-lived one each batched call
 needs to feed its stdin.
 
@@ -493,12 +543,23 @@ The binary is **`gng`** — the package stays `Git-N-Grit`, so this needs an exp
 otherwise the binary inherits the package name:
 
 ```toml
+[lib]
+name = "gng"
+path = "src/lib.rs"
+
 [[bin]]
 name = "gng"
 path = "src/main.rs"
 ```
 
-`gng` takes no arguments in the PoC. Repos are registered from inside the TUI, not the CLI.
+The library target is what the integration tests reach: a test in `tests/` links against the crate's
+lib, and a binary-only crate exposes nothing to link against. `main.rs` is the entry point over it —
+the lock, the second-instance screen, and the run loop.
+
+`gng --storage=<path>` names the storage root, and is the only argument the PoC takes —
+repos are registered from inside the TUI, not the CLI. `--storage <path>` reaches the same place, and
+anything else is a usage line on stdout and a non-zero exit. Parsing is a walk over
+`std::env::args()`; a flag crate would be an eighth dependency carrying one option.
 
 ## Dependencies
 
@@ -524,12 +585,22 @@ The parsers are pure functions over strings — reflog lines, the `--numstat` st
 output — and the XP rule is arithmetic. Unit-test all of it against fixture text, no git needed.
 
 The rest depends on how git actually behaves, so the scan gets integration tests that build
-throwaway repos with `git init` and commit into them for real:
+throwaway repos with `git init` and commit into them for real.
+
+Each such test points `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at `/dev/null` and passes the four
+`GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables to every git call it makes. A real `~/.gitconfig`
+otherwise reaches into every throwaway repo: it supplies a `user.email`, which leaves the
+no-`user.email` case below unwritable, and a `commit.gpgsign` or a hook there fails the commits
+outright. Each test also gets its own storage root, passed in.
 
 - xp arithmetic end to end — a +N −M commit scores `N + 3M`
 - a commit authored by another email scores nothing
 - a repo with no `user.email` set anywhere scores nothing and says why, rather than reading as idle
-- merge commits are skipped
+- that same repo scanned again with nothing new keeps its `!`, the scan having ended before it could
+  ask again
+- a scan that fails outright — its git dir replaced by a file — dims the row, leaves the total
+  untouched, and puts the error in the right pane
+- merge commits are skipped, and a scan following one reaches git not at all
 - commit, scan, `--amend`, scan — the second event is a rewrite worth 2
 - one scan meeting both a commit and its rewrite for the first time — the original takes full value
   and the rewrite the flat 2, whichever worktree's reflog was read first
@@ -544,7 +615,8 @@ throwaway repos with `git init` and commit into them for real:
   only the new work, with no phantom 2 xp for everything that came before
 - expire, then commit enough to regrow the reflog past its previous length, then scan — every one
   of those commits is scored, none skipped
-- a reflog naming an object gc has pruned still scans cleanly
+- a reflog naming an object gc has pruned still scans cleanly, and that SHA lands in `seen_shas`, so
+  the next scan doesn't reach git over it again
 - a binary file contributes zero rather than failing to parse, and text in the same commit still
   counts
 
@@ -575,6 +647,7 @@ And on state, identity and storage:
 
 And on running twice:
 
+- an unrecognised argument — usage on stdout, non-zero exit, no TUI and no storage directory created
 - start a second instance with stdin not a terminal — it reports the holder on stdout and exits
   non-zero, the holder keeps running, and no state file is touched
 - hand over — the holder exits 0 with `.take` blanked, the asker ends up holding it, and the holder's
