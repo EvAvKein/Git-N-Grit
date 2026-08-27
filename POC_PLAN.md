@@ -39,7 +39,7 @@ src/
 tests/        integration tests over throwaway git repos
 ```
 
-## 1 — Cargo manifest
+## 1 — Cargo manifest ✅
 
 `cargo add ratatui notify@8.2 serde --features derive serde_json anyhow dirs uuid --features v4`,
 then the `[lib]` and `[[bin]]` stanzas, both named `gng`.
