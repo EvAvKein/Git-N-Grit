@@ -44,7 +44,7 @@ tests/        integration tests over throwaway git repos
 `cargo add ratatui notify@8.2 serde --features derive serde_json anyhow dirs uuid --features v4`,
 then the `[lib]` and `[[bin]]` stanzas, both named `gng`.
 
-## 2 — `reflog.rs`
+## 2 — `reflog.rs` ✅
 
 Pure, and unit-tested before anything calls it.
 
