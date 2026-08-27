@@ -76,7 +76,7 @@ reaches git.
   live worktree's path — and never stored, so changing your identity takes effect on the next scan
   with nothing to migrate. Where it resolves to nothing, every commit scores zero, which on screen is
   indistinguishable from having done no work; a repo in that state gets the dimmed `!` and says so.
-  A scan that finds no new candidates ends before that call and leaves the marker as it stands —
+  A scan with nothing left to score ends before that call and leaves the marker as it stands —
   re-deriving it from a scan that never asked would blink the `!` off a repo that still can't earn,
   which is most scans.
 - `xp = lines_added × 1 + lines_deleted × 3`. Deleting code is worth more than writing it.
@@ -86,8 +86,8 @@ reaches git.
   records one whatever it earned: a commit worth zero was still processed, and rewriting it is
   still cleanup.
 - Merge commits score nothing, take no patch-id and are never listed. Their SHAs are recorded all
-  the same: one left out of `seen_shas` stays a candidate until its reflog entry expires, and every
-  scan until then spends both batched calls to skip it again.
+  the same: one left out of `seen_shas` comes back on every scan until its reflog entry expires, each
+  spending both batched calls to skip it again.
 - The activity pane lists every non-merge commit whose author email matched, whatever it earned — an
   `--allow-empty` commit renders `+0 −0` and `+0xp`. Another author's commit is scored and recorded
   but never listed, so a shared repo's pane stays your own work.
@@ -96,7 +96,7 @@ reaches git.
 
 Shells out to the `git` binary and parses stdout. No git library.
 
-**1 — candidates.** Read `logs/HEAD` under the git dir of every live worktree listed in the repo's
+**1 — SHAs.** Read `logs/HEAD` under the git dir of every live worktree listed in the repo's
 state file, and collect the "new" SHA (field 2) of every line, pooled into one set. That's the whole
 input, and it's naturally bounded by the reflogs' own expiry, so there is no window setting to pick:
 if git still remembers it, it counts.
@@ -114,7 +114,7 @@ each other's — and drop the all-zeros SHA. The zeros are a guard rather than a
 all-zeros in ordinary operation.
 
 Then drop every SHA already in [`seen_shas`](#state). What is left is what steps 2 and 3 run on, so
-their cost scales with the number of candidates rather than the size of the reflog they came from —
+their cost scales with the number left to score rather than the size of the reflog they came from —
 in the steady state, one commit.
 
 Where nothing is left, the scan ends here. Both calls take their input on stdin, and handed none they
@@ -143,7 +143,7 @@ nothing; text files in the same commit still count.
 and one is enough to abort the scan with `fatal: bad object`. After `--stdin` the flag is accepted
 and does nothing.
 
-A candidate the flag drops is recorded in `seen_shas`, with no patch-id and no event. Objects go
+A SHA the flag drops is recorded in `seen_shas`, with no patch-id and no event. Objects go
 missing under it where the store is borrowed — `clone --shared`, `--reference`, a hand-written
 `objects/info/alternates` — and the lender prunes them, or where something outside git removes them.
 The reflog entry outlives them by up to `gc.reflogExpire`'s ninety days, and re-minting the work
@@ -159,7 +159,7 @@ git log --ignore-missing --no-walk --stdin -p | git patch-id --stable
 Key the result by SHA: the output is not in input order, and merges and empty commits produce no
 line at all. A non-merge without one has no patch-id to record and cannot be a rewrite.
 
-**Order.** Score the candidates sorted by `ct` ascending, tie-breaking on step 1's first-seen order.
+**Order.** Score in `ct` ascending order, tie-breaking on step 1's first-seen order.
 Scoring depends on a rewrite meeting its original already paid, or the flat 2 lands on the wrong one
 of the pair. Reflog order alone can't deliver that once the reflogs are pooled:
 it is chronological *within* one file, but across the pool it is worktree A's whole history and then
@@ -295,7 +295,7 @@ this *commit* already processed". Both are needed — without `seen_shas`, every
 commits whose own patch-ids are already recorded, and each would look like a rewrite of itself and
 bank another 2 xp.
 
-`events` is capped at the newest 200, dropping from the front — candidates are walked in `ct` order
+`events` is capped at the newest 200, dropping from the front — commits are walked in `ct` order
 and appended, so storage order is chronological ascending and the right pane renders it reversed. It
 is display-only: `total_xp` is its own running sum and is never recomputed from the list, so old
 events cost nothing to discard.
@@ -685,7 +685,7 @@ CREATE TABLE event(repo_id INT, sha TEXT, ts INT, subject TEXT,
                    added INT, deleted INT, xp INT, rewrite INT);
 ```
 
-It retires four things at once. A scan becomes one transaction of `INSERT OR IGNORE` per candidate
+It retires four things at once. A scan becomes one transaction of `INSERT OR IGNORE` per SHA scored
 plus `UPDATE repo SET total_xp = total_xp + ?`, so write cost tracks *new* commits instead of
 accumulated history — a better fix than per-repo state files, which only address the cross-repo half.
 Crash safety comes from the transaction, so the tmp-and-rename goes away. The enumerate-and-sort load

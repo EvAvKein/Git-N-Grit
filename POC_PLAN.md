@@ -31,7 +31,7 @@ src/
   main.rs     bin `gng`: lock, second-instance screen, run
   lock.rs     .take exclusive lock, identity line, .takeover handover
   git.rs      every subprocess: rev-parse, rev-list, config, var, the two batched scan calls
-  reflog.rs   logs/HEAD → candidate SHAs (pure)
+  reflog.rs   logs/HEAD → the SHAs it names (pure)
   scan.rs     the three steps, scoring, the worker thread
   state.rs    RepoState, load/save, identity resolution and matching
   app.rs      App model, modes, key handling, event loop
@@ -48,9 +48,10 @@ then the `[lib]` and `[[bin]]` stanzas, both named `gng`.
 
 Pure, and unit-tested before anything calls it.
 
-`candidates(files: &[String]) -> Vec<String>` — split each line on whitespace, take field 2, dedupe
-keeping first-seen order across the pooled files, drop the all-zeros SHA. The message-less line
-`git worktree add` writes parses through the same path as every other line.
+`extract_shas(reflogs: &[String]) -> Vec<String>` — split each line on whitespace, take field 2,
+dedupe keeping first-seen order across the pooled reflogs, drop the all-zeros SHA. Each entry is one
+`logs/HEAD`'s whole text; reading them is the caller's. The message-less line `git worktree add`
+writes parses through the same path as every other line.
 
 ## 3 — `git.rs`
 
@@ -106,9 +107,9 @@ and it happens off the render path.
 scan didn't determine it and the previous answer stands — without that, the `!` would clear on the
 first scan that found nothing new, which is nearly every scan.
 
-1. Pool `logs/HEAD` from every live worktree git dir through `reflog::candidates`.
-2. Subtract `seen_shas`. Empty ⇒ return an empty delta with `no_email: None`, without reaching git at
-   all.
+1. Pool `logs/HEAD` from every live worktree git dir through `reflog::extract_shas`.
+2. Subtract `seen_shas`; what is left is `to_score`. Empty ⇒ return an empty delta with
+   `no_email: None`, without reaching git at all.
 3. `user_email` against the first live worktree's path.
 4. `numstat`, then `patch_ids`.
 5. Sort by `(ct, first_seen_index)` and walk. Two or more parents: record the SHA, with no patch-id
@@ -117,9 +118,9 @@ first scan that found nothing new, which is nearly every scan.
    the patch-id is already in the seen set — including one inserted earlier in this same walk — else
    `added + 3 * deleted`. Both sets take their inserts as the walk goes, which is what lets a rewrite
    meet its original within a single scan.
-6. Candidates that `parse_numstat` never returned are the ones `--ignore-missing` dropped. They go
-   into `new_shas` with no patch-id and no event, so the next scan doesn't spend two batched git
-   calls on a SHA whose object is gone.
+6. Entries of `to_score` that `parse_numstat` never returned are the ones `--ignore-missing`
+   dropped. They go into `new_shas` with no patch-id and no event, so the next scan doesn't spend two
+   batched git calls on a SHA whose object is gone.
 
 `spawn_worker(rx: Receiver<ScanJob>, tx: Sender<AppEvent>)` runs the above and sends
 `AppEvent::ScanDone(id, Result<ScanDelta>)`.
@@ -201,8 +202,8 @@ and no `logs/`, watch the git dir instead. Stale repos are not watched.
 
 ## 10 — Tests
 
-Unit tests beside their modules for `reflog::candidates`, `parse_numstat`, `parse_patch_ids`, the XP
-arithmetic, the label rule and the relative-time formatter.
+Unit tests beside their modules for `reflog::extract_shas`, `parse_numstat`, `parse_patch_ids`,
+the XP arithmetic, the label rule and the relative-time formatter.
 
 Integration tests in `tests/` over throwaway repos built with `git init` in a temp dir, covering the
 spec's three lists — scan behaviour, state and identity and storage, and running twice.
