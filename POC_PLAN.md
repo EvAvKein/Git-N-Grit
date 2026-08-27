@@ -4,6 +4,8 @@ The build order for the proof of concept `PROOF_OF_CONCEPT.md` specifies. That d
 of truth for behaviour; this one is the order the code goes in, the shape of each module, and the
 facts about `git` and the crates that the implementation depends on.
 
+A stage heading marked ✅ is built, tested and committed.
+
 ## Ground truth
 
 Checked against git 2.47.3 and rustc 1.98.0:
