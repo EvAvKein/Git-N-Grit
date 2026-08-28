@@ -57,9 +57,9 @@ writes parses through the same path as every other line.
 
 Thin wrappers, each returning `anyhow::Result` over captured stdout:
 
-- `resolve_identity(path) -> Identity { root_commits, git_common_dir, worktree }` — `rev-list
+- `resolve_identity(path) -> RepoIdentity { root_commits, git_common_dir, worktree }` — `rev-list
   --max-parents=0 --all` sorted, plus the two `rev-parse` lines; `worktree` is the git dir with the
-  common dir stripped from its front.
+  common dir stripped from its front, relative so it joins back onto it.
 - `user_email(path) -> Option<String>` — `config user.email`, empty output is `None`.
 - `local_utc_offset() -> i32` — the trailing field of `git var GIT_COMMITTER_IDENT`.
 - `numstat(path, shas)` and `patch_ids(path, shas)` — each spawns a thread to write the SHA list into
@@ -85,12 +85,12 @@ Parsing is separate from spawning, so the parsers unit-test against fixture text
   that fails to parse yields an inline error for that one repo and the rest still load.
 - `Storage::save(&RepoState)` — serialize to `<id>.json.tmp` beside the target, then `fs::rename`
   over `<id>.json`.
-- `match_identity(&[RepoState], &Identity) -> Match` — `Reuse(uuid)` where exactly one state's
+- `match_identity(&[RepoState], &RepoIdentity) -> Match` — `Reuse(uuid)` where exactly one state's
   `root_commits` intersects and its `git_common_dir` is equal or gone; `Pick(Vec<uuid>)` where
   several match, or where none match but a live state already holds this `git_common_dir`; `New`
   otherwise. A commitless repo matches on `git_common_dir` alone and adopts `root_commits` on the
   first scan that finds one.
-- `Storage::adopt(&mut RepoState, &Identity)` — the reuse path: refresh `root_commits` and
+- `Storage::adopt(&mut RepoState, &RepoIdentity)` — the reuse path: refresh `root_commits` and
   `git_common_dir`, append this `worktree` to `worktrees` where it isn't already listed, and save.
   `app` calls it on a `Reuse` and on a picker landing on an existing row; `New` mints a v4 UUID and
   an `added_at` instead.

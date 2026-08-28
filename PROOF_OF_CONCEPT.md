@@ -221,8 +221,8 @@ by its [identity](#repo-identity).
   "seen_shas": ["a0f0365…"],
   "seen_patch_ids": ["84b8408…"],
   "worktrees": [
-    { "worktree": "",                   "path": "/home/eve/repo/Git-N-Grit" },
-    { "worktree": "/worktrees/feature", "path": "/home/eve/repo/feature"   }
+    { "worktree": "",                  "path": "/home/eve/repo/Git-N-Grit" },
+    { "worktree": "worktrees/feature", "path": "/home/eve/repo/feature"   }
   ],
   "events": [
     { "sha": "a0f0365…", "ts": 1756100000, "subject": "feat: parse reflog",
@@ -238,12 +238,13 @@ has one parent and so is not skipped as a merge. One `seen_shas` and one `seen_p
 whole store is what makes that work count once. A set per worktree would pay for it twice at full
 value.
 
-A worktree's git dir is `git_common_dir` + `worktree`, which is git's own layout: `worktree` is empty
-for the main worktree and `/worktrees/<name>` for a linked one. Its reflog is `<git dir>/logs/HEAD`.
-`path` is the working tree, stored because it is not derivable, and it is never the git dir —
-`path + "/.git"` is wrong for a linked worktree or a submodule, where `.git` is a *file* pointing
-elsewhere; for `git init --separate-git-dir`; for a bare repo, which has no `/.git` to append; and
-whenever the add prompt is handed a subdirectory and `rev-parse` resolves upward.
+A worktree's git dir is `git_common_dir` joined with `worktree`, which is git's own layout:
+`worktree` is relative — empty for the main worktree and `worktrees/<name>` for a linked one. Its
+reflog is `logs/HEAD` under that dir. `path` is the working tree, stored because it is not
+derivable, and it is never the git dir — `path + "/.git"` is wrong for a linked worktree or a
+submodule, where `.git` is a *file* pointing elsewhere; for `git init --separate-git-dir`; for a
+bare repo, which has no `/.git` to append; and whenever the add prompt is handed a subdirectory and
+`rev-parse` resolves upward.
 
 A scan rewrites one state file, so the cost of a write tracks the store that changed rather than
 everything ever registered — and a scan fires on every commit. A failed write costs one store's XP
@@ -319,8 +320,9 @@ git -C <path> rev-parse --path-format=absolute --git-dir --git-common-dir
 ```
 
 `root_commits` is the first command's output, sorted. `git_common_dir` names the object store, and
-`worktree` is the git dir with the common dir stripped from its front — empty for a main worktree,
-`/worktrees/<name>` for a linked one. `--separate-git-dir` repos, bare repos and submodules all
+`worktree` is the git dir with the common dir stripped from its front, leaving a relative path —
+empty for a main worktree, `worktrees/<name>` for a linked one. A git dir that does not sit under the
+common dir fails the resolve. `--separate-git-dir` repos, bare repos and submodules all
 resolve to an empty `worktree` and stay distinct by their root commits.
 
 An existing state file matches when its `root_commits` **intersects** the set just resolved, and
@@ -371,6 +373,10 @@ full value.
 
 A repo with no commits yet has no root commits — `git_common_dir` and `worktree` still resolve. Fall
 back to the common dir alone and adopt `root_commits` on the first scan that finds one.
+
+A shallow clone reports its graft boundary rather than its true root, and `fetch --unshallow`
+replaces it. Such a repo re-added after it deepens intersects nothing, and reaches the picker on its
+live `git_common_dir`.
 
 ## Adding and removing
 
