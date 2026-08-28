@@ -53,7 +53,7 @@ dedupe keeping first-seen order across the pooled reflogs, drop the all-zeros SH
 `logs/HEAD`'s whole text; reading them is the caller's. The message-less line `git worktree add`
 writes parses through the same path as every other line.
 
-## 3 — `git.rs`
+## 3 — `git.rs` ✅
 
 Thin wrappers, each returning `anyhow::Result` over captured stdout:
 
