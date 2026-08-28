@@ -4,7 +4,10 @@ The build order for the proof of concept `PROOF_OF_CONCEPT.md` specifies. That d
 of truth for behaviour; this one is the order the code goes in, the shape of each module, and the
 facts about `git` and the crates that the implementation depends on.
 
-A stage heading marked ✅ is built, tested and committed.
+The stages are built one at a time, each pausing for review before the next one starts. The review is
+what the commit waits on, so the working tree holds the finished stage until then.
+
+A stage heading marked ✅ is built and tested.
 
 ## Ground truth
 
