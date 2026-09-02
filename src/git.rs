@@ -17,9 +17,10 @@ pub struct RepoIdentity {
     pub root_commits: Vec<String>,
     /// `--git-common-dir`: the object store, shared by every worktree of the repo.
     pub git_common_dir: PathBuf,
-    /// Relative to `git_common_dir`, so joining the two gives this worktree's git
-    /// dir. Empty for a main worktree, `worktrees/<name>` for a linked one.
-    pub worktree: PathBuf,
+    /// The git dir, relative to `git_common_dir`, so joining the two reaches
+    /// this worktree's own `HEAD` and `logs/HEAD`. Empty for a main worktree,
+    /// `worktrees/<name>` for a linked one.
+    pub head_subdir: PathBuf,
 }
 
 /// One commit of a `--numstat` stream, with its counts already summed.
@@ -35,6 +36,9 @@ pub struct CommitInfo {
 }
 
 /// The repo `path` belongs to.
+///
+/// Spawns git against a path that may not answer, so the scan worker calls this
+/// and the main thread never does — including for the add prompt.
 pub fn resolve_identity(path: &Path) -> Result<RepoIdentity> {
     // One root commit per line.
     let mut root_commits: Vec<String> = capture(Command::new("git").arg("-C").arg(path).args([
@@ -61,19 +65,20 @@ pub fn resolve_identity(path: &Path) -> Result<RepoIdentity> {
 
     // Bail rather than fall back: an absolute suffix would silently swallow the
     // common dir on every join.
-    let Ok(worktree) = Path::new(git_dir).strip_prefix(common) else {
+    let Ok(head_subdir) = Path::new(git_dir).strip_prefix(common) else {
         bail!("git dir {git_dir:?} is not under common dir {common:?}");
     };
 
     Ok(RepoIdentity {
         root_commits,
         git_common_dir: PathBuf::from(common),
-        worktree: worktree.to_path_buf(),
+        head_subdir: head_subdir.to_path_buf(),
     })
 }
 
-/// `user.email` as it resolves at `path`. Unset exits non-zero with no output,
-/// which is a `None` rather than an error.
+/// `user.email` as it resolves at `path`. Unset exits 1 with no output, which is
+/// a `None` rather than an error; every other exit is an error, so a path that has
+/// gone away (128) reads as a failed scan rather than a missing identity.
 pub fn user_email(path: &Path) -> Result<Option<String>> {
     let out = Command::new("git")
         .arg("-C")
@@ -81,6 +86,13 @@ pub fn user_email(path: &Path) -> Result<Option<String>> {
         .args(["config", "user.email"])
         .output()
         .context("running git config user.email")?;
+
+    if !out.status.success() && out.status.code() != Some(1) {
+        bail!(
+            "git config user.email failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
 
     let email = String::from_utf8_lossy(&out.stdout).trim().to_string();
     Ok((!email.is_empty()).then_some(email))
@@ -415,6 +427,12 @@ mod tests {
         let text = format!("\n{A}\n84b8408eb0d5cd0e1f2a3b4c5d6e7f8091a2b3c4 {B}\n");
 
         assert_eq!(parse_patch_ids(&text).len(), 1);
+    }
+
+    /// Exit 128, not the 1 an unset key exits with, so it must not read as `None`.
+    #[test]
+    fn a_path_that_is_gone_is_an_error_not_an_absent_email() {
+        assert!(user_email(Path::new("/no/such/dir")).is_err());
     }
 
     #[test]

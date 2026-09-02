@@ -56,24 +56,34 @@ nothing to back out of, and it does nothing.
 The panes split 45/55, with the left one floored at 28 columns and capped at 40 — a total is worth
 more than the tail of a long label, and a repo row is worth more than an empty gutter.
 
-A dimmed `!` row is one that isn't earning: its git dir no longer resolves, leaving it
-[stale](#state); it has no `user.email` to match commits against; or its last scan failed. It keeps
-its total in every case, and the right pane says which in place of the event list:
+A dimmed `!` row is one that isn't earning: its git dir no longer resolves, or holds a different repo
+than the one recorded, leaving it [stale](#state); the filesystem holding it has stopped answering;
+it has no `user.email` to match commits against; its last scan failed; or the repo
+[appears twice](#state) and the other one is earning. It keeps its total in every case, and the right pane says which in place of the event list:
 
 ```
   this repo has moved or been deleted
+  a different repo is at this path now
+  this repo's filesystem is not responding
   no user.email is set, so no commit can be matched
   last scan failed: fatal: not a git repository
+  this repo appears twice; the other one is earning
+  this repo appears twice; neither is earning until you delete one
 ```
 
-A stale repo stays marked until the next start or a re-add. The other two lift on the next scan that
-reaches git.
+A stale repo stays marked until its store turns up again, which the app checks for once a second. The
+`user.email` and scan marks lift on the next scan that reaches git, and a repo listed twice when
+either of the two is deleted.
+
+A state file that doesn't load gets a dimmed row of its own, labelled by its filename. It is not a
+repo — no total, never scanned — and the right pane carries the reason it wouldn't load. `d` on it
+deletes the file.
 
 ## XP rules
 
 - Only commits whose **author email** matches the repo's own `user.email` earn anything, compared
-  case-insensitively. It is read once per scan — `git -C <path> config user.email`, against the first
-  live worktree's path — and never stored, so changing your identity takes effect on the next scan
+  case-insensitively. It is read once per scan — `git -C <path> config user.email`, in the directory
+  [git is run in](#scanning) — and never stored, so changing your identity takes effect on the next scan
   with nothing to migrate. Where it resolves to nothing, every commit scores zero, which on screen is
   indistinguishable from having done no work; a repo in that state gets the dimmed `!` and says so.
   A scan with nothing left to score ends before that call and leaves the marker as it stands —
@@ -95,6 +105,13 @@ reaches git.
 ## How it reads git
 
 Shells out to the `git` binary and parses stdout. No git library.
+
+Reflogs are read from git dirs; every `git -C` is run somewhere else. A worktree's git dir can
+outlive its files — delete a linked worktree by hand, or the working tree of a
+`--separate-git-dir` repo — and `git -C` against a directory that is gone exits 128, which would
+fail the whole scan of a repo that is otherwise fine. So git runs in the first live worktree whose
+files are still there, and in `git_common_dir` itself where none are: `config`, `log --numstat` and
+`patch-id` all answer from a git dir with no working tree.
 
 **1 — SHAs.** Read `logs/HEAD` under the git dir of every live worktree listed in the repo's
 state file, and collect the "new" SHA (field 2) of every line, pooled into one set. That's the whole
@@ -127,6 +144,13 @@ f5d1d2c21b8683e35dc6f5c232db38a5edfa91de     # HEAD
 
 which scores a commit no reflog named. A repo whose reflog has just been expired away reaches this
 with no filtering at all.
+
+Where something *is* left, the scan resolves the store's identity first and scores nothing unless it
+still shows a root commit the state file holds. A path can be refilled by an unrelated project
+between one scan and the next — `rm -rf /repo && git clone <other> /repo`, or `rm -rf .git && git
+init` in place — and that store is live, watched, and full of commits with the right author email,
+so nothing a `stat` can see distinguishes it. The check costs one `rev-list` on a scan that already
+has two batched calls to make, and nothing on the scans that end above.
 
 **2 — stats.** Pipe those SHAs into one batched call:
 
@@ -174,13 +198,22 @@ pipe buffer fills.
 **When a scan runs.** At startup for every live repo, on a successful add for that repo, on `r` for
 every live repo, and on the reflog events [Liveness](#liveness) describes. `r` covers the whole list
 rather than the selected row: a scan with nothing new costs no git call at all, so scoping it would
-save nothing and leave a missed commit needing a walk down every row to find.
+save nothing and leave a missed commit needing a walk down every row to find. Those first three also
+re-resolve which repos and worktrees are live.
 
 **Where it runs.** On one worker thread — not on the main thread, and not one thread per scan. The
 main thread posts a job per dirty repo; the worker runs the three steps and the scoring and sends
 back a delta — new events, xp earned, new SHAs, new patch-ids — as one more `AppEvent`. The main
 thread applies it and writes the state file, so state keeps a single owner and the write stays on
 the path `q` and handover already take.
+
+Every `stat` and every `git` the app runs happens there as well, and none on the main thread. A path
+that has stopped answering keeps the thread that touched it, and the main thread is the one that has
+to go on drawing and answering `q`. So liveness is the worker's answer too: the main thread queues a
+job for every repo rather than every live one, having no way to know which is which, and the delta
+reports what the worker found — whether the store is still there, and which worktrees to watch. A
+stale one is answered by the probe alone, with no git call behind it. Until the first deltas land
+nothing is known to be live, and rows render without `!`.
 
 A repo with a job in flight is not queued again. Events arriving meanwhile mark it dirty, and it is
 re-queued when its delta lands. Its row goes on rendering the total it already had: most scans find
@@ -208,8 +241,9 @@ repos/
 ```
 
 The filename is a v4 UUID, assigned once and never changed — including when a commitless repo gains
-its first commit. Nothing reads it: the left pane orders by `added_at`, and a state file is located
-by its [identity](#repo-identity).
+its first commit. It names the record and is read back as its id — a file whose name is not a UUID
+does not load — but nothing locates a repo by it: the left pane orders by `added_at`, and a state
+file is found by its [identity](#repo-identity).
 
 ```json
 {
@@ -221,11 +255,11 @@ by its [identity](#repo-identity).
   "seen_shas": ["a0f0365…"],
   "seen_patch_ids": ["84b8408…"],
   "worktrees": [
-    { "worktree": "",                  "path": "/home/eve/repo/Git-N-Grit" },
-    { "worktree": "worktrees/feature", "path": "/home/eve/repo/feature"   }
+    { "head_subdir": "",                  "source_dir": "/home/eve/repo/Git-N-Grit" },
+    { "head_subdir": "worktrees/feature", "source_dir": "/home/eve/repo/feature"   }
   ],
   "events": [
-    { "sha": "a0f0365…", "ts": 1756100000, "subject": "feat: parse reflog",
+    { "sha": "a0f0365…", "timestamp": 1756100000, "subject": "feat: parse reflog",
       "added": 120, "deleted": 34, "xp": 222, "rewrite": false }
   ]
 }
@@ -238,20 +272,24 @@ has one parent and so is not skipped as a merge. One `seen_shas` and one `seen_p
 whole store is what makes that work count once. A set per worktree would pay for it twice at full
 value.
 
-A worktree's git dir is `git_common_dir` joined with `worktree`, which is git's own layout:
-`worktree` is relative — empty for the main worktree and `worktrees/<name>` for a linked one. Its
-reflog is `logs/HEAD` under that dir. `path` is the working tree, stored because it is not
-derivable, and it is never the git dir — `path + "/.git"` is wrong for a linked worktree or a
-submodule, where `.git` is a *file* pointing elsewhere; for `git init --separate-git-dir`; for a
-bare repo, which has no `/.git` to append; and whenever the add prompt is handed a subdirectory and
-`rev-parse` resolves upward.
+A worktree entry names two directories. `head_subdir` locates the dir holding this worktree's own
+`HEAD`, and so its `logs/HEAD`. It is stored relative to `git_common_dir` — empty for the main
+worktree and `worktrees/<name>` for a linked one, which is git's own layout. `source_dir` is where the
+files are: what the left pane labels the row from, and where [git is run](#scanning).
+
+Both are stored because neither yields the other. `source_dir + "/.git"` is wrong for a linked
+worktree or a submodule, where `.git` is a *file* pointing elsewhere; for `git init
+--separate-git-dir`; for a bare repo, which has no `/.git` to append; and whenever the add prompt is
+handed a subdirectory and `rev-parse` resolves upward.
 
 A scan rewrites one state file, so the cost of a write tracks the store that changed rather than
 everything ever registered — and a scan fires on every commit. A failed write costs one store's XP
 and no other's, which matters because a lost `seen_patch_ids` makes every commit still in its reflogs
 re-mintable at full value.
 
-`version` is per state file, so repos migrate independently.
+`version` is per state file, so repos migrate independently. A file numbered above this build's own
+does not load: serde drops the fields it doesn't know, and the next save would write that truncation
+back over the newer writer's work.
 
 The storage root is a parameter rather than a lookup: `main` resolves [`--storage`](#binary) where it
 is given and `dirs::data_dir()/git-n-grit` otherwise, then hands the result down, and nothing below
@@ -271,11 +309,20 @@ second `gng`. This covers process death, not power loss; handing over to another
 through the ordinary quit path and so does not widen the window.
 
 **Loading.** Enumerate `repos/*.json` and sort by `added_at`, tie-breaking on `git_common_dir`, for
-the left pane's order. A row is labelled from the `path` of its main worktree, or of the first entry
-listed where only linked worktrees are registered. Matching `*.json` rather than `*` is what makes a
-`.tmp` left by an interrupted write harmless. A state file that fails to parse skips that one repo
-with an inline error instead of aborting startup — per-repo isolation buys nothing if one bad state
-file still takes down the list.
+the left pane's order. A row is labelled from the `source_dir` of its main worktree, or of the first
+entry listed where only linked worktrees are registered. Matching `*.json` rather than `*` is what makes a
+`.tmp` left by an interrupted write harmless. A state file that fails to load — unparseable,
+misnamed, or numbered ahead of this build — skips that one repo instead of aborting startup, and
+takes a row of its own carrying the reason. Per-repo isolation buys nothing if one bad state file
+still takes down the list, and a repo that vanished from the left pane with nothing on screen to say
+why would read as XP simply lost. The `repos` directory failing to read is one row of its own naming
+that directory, since what is under it is then unknown rather than damaged.
+
+**A store named twice.** Two state files holding one `git_common_dir` would both watch its reflog and
+both score it, so the most recently written file earns and the other keeps its total unwatched. Where
+a file's mtime won't read, neither earns — the newest can't be named, and banking into a total picked
+by guesswork is worse than banking into none. Deleting either state file settles it. Merging them is
+not offered: their totals were earned under histories that can no longer be told apart.
 
 **Stale repos.** Liveness is per worktree and keyed on the git dir, which is what holds the reflog. A
 worktree whose git dir is gone is dropped from the watch and scan set; a store whose
@@ -284,8 +331,54 @@ pane, and is neither watched nor scanned. Moving a repo on disk puts it in this 
 deleting one. Without the marker a stale repo is indistinguishable from an idle one, and stops
 earning XP with nothing on screen to say why.
 
-Moving one back does not lift the marker until the next start or a re-add — either resolves the
-common dir again and finds it.
+Liveness is resolved again at startup, on an add and on `r`, both ways: a store whose common dir is
+back is watched and scanned once more, and one that has just gone loses its watches and takes the
+marker. The [worker](#scanning) answers it, so each of those is a job queued and a delta applied
+rather than anything the main thread looks up for itself.
+
+A stale store is also probed once a second by a thread of its own, which stats each one's stored
+`git_common_dir` and reports the ids that resolve again. It parks while nothing is stale and is woken
+when something goes, so an app whose repos are all live wakes for it zero times. A stale repo has no
+watch left to fire — the directory holding its reflog is the one that went away — so this is the one
+place the app learns something with no event to carry it: a mount returning and a directory moved
+back into place both happen in silence.
+
+A returning repo resolves its identity before it earns again, and stays stale unless it still matches
+the state file it left. A path deleted and refilled — a different project cloned there — would
+otherwise score a reflog that has nothing to do with the total it lands in. That costs one `rev-list`
+and one `rev-parse` per repo that came back, and nothing for one that didn't.
+
+Roots once stored have to show themselves again for that to count as a match: a resolve of no roots
+leaves the repo stale rather than falling back to the common dir. `git clone` creates `.git` seconds
+before it writes a ref, so a probe every second lands inside that window, and the commitless fallback
+would hand the clone this row and its total. A state file holding no roots has never scored anything —
+the first scan to find one adopts it — so those keep the fallback and risk nothing by it.
+
+The resolve answers one of three ways, and they part company on what happens next. Roots that
+intersect are this repo, which un-stales and is watched again. No roots at all is a clone still
+writing, so the probe stays and asks a second later. Roots that resolved and missed every stored one
+are a different project, and that probe is dropped: the path will go on existing, and re-resolving it
+every second forever costs a `rev-list` and a `rev-parse` each time to reach the same answer. The
+cost of dropping it is that moving the original repo back over that path changes nothing a `stat` can
+see, so it waits for `r` or a restart.
+
+**A probe that doesn't come back.** `Path::exists` is a `stat`, and on a hard-mounted NFS share whose
+server is gone, a FUSE mount whose daemon died, an autofs trigger or failing hardware, it blocks
+uninterruptibly. Those are the same filesystems a stale repo tends to live on, so the probe aims
+where hangs are likeliest.
+
+Nothing can free such a thread. Rust has no thread cancellation; `pthread_cancel` waits for a
+cancellation point that a blocked `stat` never reaches; a task in that state takes no signal, which is
+why `kill -9` cannot shift a process stuck on a dead NFS mount. So the thread publishes the path it
+is about to stat and the time it started, and a call outstanding past ten seconds is taken as
+wedged: the app abandons that thread — it exits on its own if the mount ever answers — and spawns a
+replacement whose work leaves that path out, so every other repo goes on being watched. The
+abandoned threads are bounded by the number of paths that can wedge. The row then reads `this repo's
+filesystem is not responding`, which is a different thing from having moved or been deleted.
+
+Both threads that touch the filesystem carry this, the ticker and the [worker](#scanning), and are
+abandoned the same way. A worker takes its queue down with it, so the main thread holds the jobs it
+has no delta for and posts them again to the replacement.
 
 Deleting a linked worktree's directory by hand leaves its git dir and reflog behind under the common
 dir — `git worktree list` calls this *prunable*. That entry stays live and harmless: the working tree
@@ -320,14 +413,14 @@ git -C <path> rev-parse --path-format=absolute --git-dir --git-common-dir
 ```
 
 `root_commits` is the first command's output, sorted. `git_common_dir` names the object store, and
-`worktree` is the git dir with the common dir stripped from its front, leaving a relative path —
+`head_subdir` is the git dir with the common dir stripped from its front, leaving a relative path —
 empty for a main worktree, `worktrees/<name>` for a linked one. A git dir that does not sit under the
 common dir fails the resolve. `--separate-git-dir` repos, bare repos and submodules all
-resolve to an empty `worktree` and stay distinct by their root commits.
+resolve to an empty `head_subdir` and stay distinct by their root commits.
 
 An existing state file matches when its `root_commits` **intersects** the set just resolved, and
 either its `git_common_dir` is equal or the stored one no longer exists on disk. On a match, reuse
-that state file: refresh `root_commits` and `git_common_dir`, and append this `worktree` to
+that state file: refresh `root_commits` and `git_common_dir`, and append this `head_subdir` to
 `worktrees` if it is not already listed.
 
 Intersection rather than equality, because the set grows. `git checkout --orphan`, the ordinary way
@@ -343,8 +436,8 @@ projects do not share a root commit, and clones of one upstream are held apart b
 intersection gives up nothing. Rewriting history at the root does empty it, and such a repo starts
 over.
 
-Where nothing matches but a live state file already holds the resolved `git_common_dir`, the add
-goes to the picker instead of opening a new state file. One git dir under two state files would
+Where nothing matches but live state files already hold the resolved `git_common_dir`, the add
+goes to the picker — listing every one of them — instead of opening a new state file. One git dir under two state files would
 double-count: both would watch that reflog, and both would score it. Two situations arrive here — a repo
 re-initialised in place, and a different project cloned over a deleted one's path — and git cannot
 tell them apart, since in both the old objects are gone and only the path is shared. The first wants
@@ -371,8 +464,10 @@ the candidates by their stored paths and the user picks, with a "new repo" optio
 arbitrarily merges two histories into one state file; opening a new one re-scores a whole reflog at
 full value.
 
-A repo with no commits yet has no root commits — `git_common_dir` and `worktree` still resolve. Fall
-back to the common dir alone and adopt `root_commits` on the first scan that finds one.
+A resolve that yields no root commits matches on the common dir alone and keeps whatever roots were
+stored — a repo with no commits yet, which adopts `root_commits` on the first scan that finds one, or
+one whose refs are momentarily gone. `git_common_dir` and `head_subdir` resolve either way. A set
+that has *changed* still has to intersect; only an empty one falls back.
 
 A shallow clone reports its graft boundary rather than its true root, and `fetch --unshallow`
 replaces it. Such a repo re-added after it deepens intersects nothing, and reaches the picker on its
@@ -388,6 +483,12 @@ an inline error and leaves the prompt open.
 
 While the prompt is open its keys are text — `a`, `d`, `r` and `q` type themselves rather than
 command — so enter and esc are the only ways out of it, submitting and abandoning.
+
+Resolving a typed path means running `git` in it and stat-ing what is already registered, so enter
+hands the path to the [scan worker](#scanning) rather than doing either on the main thread. The
+prompt says it is checking and goes on taking keys; esc leaves, and an answer arriving for a prompt
+that has moved on is dropped. A path on a filesystem that has stopped answering therefore takes the
+worker, not the app, and the row it would have created simply never appears.
 
 An accepted path resolves its identity and looks for a state file to reuse. Adding a linked worktree
 of an already-registered repo joins that repo's state file rather than opening a new one, and the
@@ -414,6 +515,11 @@ Cancel is where the selection starts, and esc is the same answer. Taking Remove 
 file and drops the repo's watches. The XP goes too — nothing else holds it. Removal is also the way
 back from a wrong pick at the picker, which otherwise merges two histories with no undo.
 
+On an unreadable state file's row the confirm names the filename, there being no total to name, and
+Remove deletes that file. Without it, clearing that row would mean leaving the app and hunting down a
+UUID by hand. The row naming the `repos` directory has no Remove: every repo sits behind it, and
+deleting it is not the answer to it not reading.
+
 ## Liveness
 
 One `notify` watcher across the `logs` **directory** of every live worktree, non-recursive, keeping
@@ -432,22 +538,29 @@ A write triggers a rescan of that repo and a redraw — commit in another pane a
 its own. One commit fires around three events (open, modify, close), so drain the channel into a
 set of dirty repos and queue each once.
 
-Input, file events and finished scans funnel into a single `std::sync::mpsc` channel, so the main
-thread blocks on `recv()` and never polls:
+Input, file events, finished scans and returning stores funnel into a single `std::sync::mpsc`
+channel, so the main thread waits in one place:
 
 ```
 thread:  loop { event::read() }   ──┐
-notify's own watcher thread       ──┼──> mpsc::Sender<AppEvent> ──> main: rx.recv()
+notify's own watcher thread       ──┤
+stale ticker                      ──┼──> mpsc::Sender<AppEvent> ──> main: rx.recv[_timeout]()
 scan worker                       ──┘                                     │
         ▲                                                                 │
         └──────────────────── job per dirty repo ─────────────────────────┘
 ```
 
+The timeout is the wedge check, and it is armed only when a wedge is possible: a job outstanding, or
+a repo stale and so being stat-ed every second. Those are the only times a thread is inside a
+filesystem call, and a wedged one sends nothing, so without it the app would learn of a dead mount at
+the next keypress and not before. With every repo live and nothing queued, the main thread blocks and
+wakes for nothing at all.
+
 `notify` already sends into a channel of your choosing — its `EventHandler` is blanket-implemented
 for `FnMut(notify::Result<Event>) + Send`, so a closure holding the `Sender<AppEvent>` is the whole
-forwarder, and it needs no thread of ours. That leaves two
-spawned by hand, the key reader and the scan worker, plus the short-lived one each batched call
-needs to feed its stdin.
+forwarder, and it needs no thread of ours. That leaves three spawned by hand — the key reader, the
+scan worker and the stale ticker — plus the short-lived one each batched call needs to feed its
+stdin.
 
 ## One instance at a time
 
@@ -632,6 +745,11 @@ And on state, identity and storage:
 - more than 200 commits — `events` holds 200, and `total_xp` still reflects every one of them
 - a stray `repos/<id>.json.tmp` is ignored at startup
 - an unparseable state file skips that repo and leaves the others loading normally
+- a state file numbered ahead of this build skips that repo, and the others load
+- `cp` a state file to a second UUID — both rows say the repo appears twice, only the newer earns,
+  and deleting either leaves the other earning again
+- an unreadable state file gets a row of its own, and `d` on it deletes that file and leaves every
+  other one byte-identical
 - earn XP, `mv` the repo, re-add — matched by root commit, total unchanged, nothing re-scored
 - earn XP, delete the directory, clone a *different* repo to that path, re-add — the picker appears,
   and "new repo" leaves nothing inherited
@@ -647,7 +765,20 @@ And on state, identity and storage:
 - `git checkout --orphan` a branch, commit, re-add the repo — it matches on the root-commit
   intersection instead of reading as a new repo
 - `mv` a registered repo without re-adding it — it loads stale, keeps its total, and is not watched
-- delete a linked worktree's directory by hand — the repo stays live and its total is unchanged
+- `mv` it away, `r`, `mv` it back, `r` — the row un-stales and scores a commit made while it was
+  gone, so the watch was registered again and not merely the marker cleared
+- `mv` it away, clone a different repo to the path it left, `r` — the row stays stale and inherits
+  nothing
+- `rm -rf .git && git init` in a registered repo, then commit — the commits score nowhere, and the
+  row says the repo it recorded is gone rather than banking them into that total
+- `mv` it away and back with nothing else happening — it un-stales on its own within a couple of
+  seconds and scores a commit made while it was gone
+- a `git clone` in flight into the path a stale repo left does not un-stale that row; a clone of the
+  same upstream there does, once its refs are written
+- delete a linked worktree's directory by hand — the repo stays live, keeps scoring from its other
+  worktrees, and its total is unchanged
+- delete the working tree of a `--separate-git-dir` repo — it goes on scoring from the store itself
+  rather than failing every scan
 - two clones of one upstream, both moved, then one re-added — the picker lists both candidates
 - `d` a repo — its state file is gone, every other one is byte-identical, and its watches are dropped
 
@@ -683,11 +814,11 @@ JSON above is deliberately shaped to mirror its schema:
 ```sql
 CREATE TABLE repo(id INTEGER PRIMARY KEY, git_common_dir TEXT,
                   root_commits TEXT, total_xp INTEGER, added_at INTEGER);
-CREATE TABLE worktree(repo_id INT, worktree TEXT, path TEXT,
-                      PRIMARY KEY(repo_id, worktree)) WITHOUT ROWID;
+CREATE TABLE worktree(repo_id INT, head_subdir TEXT, source_dir TEXT,
+                      PRIMARY KEY(repo_id, head_subdir)) WITHOUT ROWID;
 CREATE TABLE seen_sha(repo_id INT, sha TEXT, PRIMARY KEY(repo_id, sha)) WITHOUT ROWID;
 CREATE TABLE seen_patch_id(repo_id INT, patch_id TEXT, PRIMARY KEY(repo_id, patch_id)) WITHOUT ROWID;
-CREATE TABLE event(repo_id INT, sha TEXT, ts INT, subject TEXT,
+CREATE TABLE event(repo_id INT, sha TEXT, timestamp INT, subject TEXT,
                    added INT, deleted INT, xp INT, rewrite INT);
 ```
 
@@ -695,7 +826,7 @@ It retires four things at once. A scan becomes one transaction of `INSERT OR IGN
 plus `UPDATE repo SET total_xp = total_xp + ?`, so write cost tracks *new* commits instead of
 accumulated history — a better fix than per-repo state files, which only address the cross-repo half.
 Crash safety comes from the transaction, so the tmp-and-rename goes away. The enumerate-and-sort load
-goes away. The events cap becomes `DELETE … ORDER BY ts LIMIT`.
+goes away. The events cap becomes `DELETE … ORDER BY timestamp LIMIT`.
 
 It is not in the PoC because it adds `rusqlite` — bundled, compiling SQLite from C — plus a schema
 and migrations, to a project whose stated ethos is seven dependencies and parsing `git` stdout. At
