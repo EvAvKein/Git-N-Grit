@@ -75,6 +75,8 @@ pub enum Duplicate {
 pub enum Ownership {
     /// This state's. Score it, and take it back where it had gone.
     Ours,
+    /// Ours, but its root commits have changed since we recorded them.
+    Rerooted,
     /// Nothing yet says what it is, so ask again rather than deciding.
     NotYet,
     /// A different project's. Nothing here is scored into this state's total.
@@ -206,7 +208,7 @@ impl RepoState {
     }
 
     /// Whose the store now at this state's path is.
-    pub fn ownership(&self, identity: &RepoIdentity) -> Ownership {
+    pub fn ownership(&self, identity: &RepoIdentity, holds_seen_commits: bool) -> Ownership {
         // A state holding no roots has never scored: the first scan to find one
         // adopts it, so the common dir is all there is to match on.
         if self.root_commits.is_empty() {
@@ -227,7 +229,14 @@ impl RepoState {
                 return Ownership::Ours;
             }
         }
-        Ownership::Foreign
+
+        // A store deleted and refilled holds none of what we scored; one whose
+        // history was rewritten in place still does.
+        if holds_seen_commits {
+            Ownership::Rerooted
+        } else {
+            Ownership::Foreign
+        }
     }
 
     /// The directory a row is labelled from: the main worktree's, or the first
@@ -255,13 +264,11 @@ pub enum Match {
 
 /// Which state file, if any, the resolved identity belongs to.
 ///
-/// Stats every candidate's common dir, so this is the scan worker's to call.
-pub fn match_identity(states: &[RepoState], identity: &RepoIdentity) -> Match {
-    match_identity_with(states, identity, |dir| dir.exists())
-}
-
-/// `match_identity` with liveness injected, so the rules test without a disk.
-fn match_identity_with(
+/// `is_live` answers whether a stored common dir is still on disk. It is a
+/// parameter rather than a `Path::exists` call so the rules test without a
+/// disk, and so the scan worker can publish each path it is about to stat —
+/// any one of these candidates can be the one that hangs.
+pub fn match_identity(
     states: &[RepoState],
     identity: &RepoIdentity,
     is_live: impl Fn(&Path) -> bool,
@@ -595,7 +602,7 @@ mod tests {
         let resolved = identity(&[ROOT_A, ROOT_C], "/repo/.git", "");
 
         assert_eq!(
-            match_identity_with(&[existing], &resolved, live_except(&[])),
+            match_identity(&[existing], &resolved, live_except(&[])),
             Match::Reuse(id)
         );
     }
@@ -607,7 +614,7 @@ mod tests {
         let resolved = identity(&[ROOT_A], "/new/.git", "");
 
         assert_eq!(
-            match_identity_with(&[existing], &resolved, live_except(&["/old/.git"])),
+            match_identity(&[existing], &resolved, live_except(&["/old/.git"])),
             Match::Reuse(id)
         );
     }
@@ -619,7 +626,7 @@ mod tests {
         let resolved = identity(&[ROOT_A], "/fork/.git", "");
 
         assert_eq!(
-            match_identity_with(&[parent], &resolved, live_except(&[])),
+            match_identity(&[parent], &resolved, live_except(&[])),
             Match::New
         );
     }
@@ -632,7 +639,7 @@ mod tests {
         let resolved = identity(&[ROOT_A], "/here/.git", "");
 
         assert_eq!(
-            match_identity_with(
+            match_identity(
                 &[one, two],
                 &resolved,
                 live_except(&["/gone/one/.git", "/gone/two/.git"])
@@ -649,7 +656,7 @@ mod tests {
         let resolved = identity(&[ROOT_B], "/repo/.git", "");
 
         assert_eq!(
-            match_identity_with(&[existing], &resolved, live_except(&[])),
+            match_identity(&[existing], &resolved, live_except(&[])),
             Match::Pick(vec![id])
         );
     }
@@ -664,7 +671,7 @@ mod tests {
         let resolved = identity(&[ROOT_C], "/repo/.git", "");
 
         assert_eq!(
-            match_identity_with(&[first, second], &resolved, live_except(&[])),
+            match_identity(&[first, second], &resolved, live_except(&[])),
             Match::Pick(ids)
         );
     }
@@ -675,7 +682,7 @@ mod tests {
         let resolved = identity(&[ROOT_B], "/two/.git", "");
 
         assert_eq!(
-            match_identity_with(&[existing], &resolved, live_except(&[])),
+            match_identity(&[existing], &resolved, live_except(&[])),
             Match::New
         );
     }
@@ -687,7 +694,7 @@ mod tests {
         let resolved = identity(&[ROOT_A], "/repo/.git", "worktrees/feature");
 
         assert_eq!(
-            match_identity_with(&[existing], &resolved, live_except(&[])),
+            match_identity(&[existing], &resolved, live_except(&[])),
             Match::Reuse(id)
         );
     }
@@ -699,7 +706,7 @@ mod tests {
         let resolved = identity(&[], "/repo/.git", "");
 
         assert_eq!(
-            match_identity_with(&[existing], &resolved, live_except(&[])),
+            match_identity(&[existing], &resolved, live_except(&[])),
             Match::Reuse(id)
         );
     }
@@ -712,7 +719,7 @@ mod tests {
         let resolved = identity(&[ROOT_A], "/repo/.git", "");
 
         assert_eq!(
-            match_identity_with(&[existing], &resolved, live_except(&[])),
+            match_identity(&[existing], &resolved, live_except(&[])),
             Match::Reuse(id)
         );
     }
@@ -785,18 +792,30 @@ mod tests {
 
         // An orphan branch has added a second root since.
         assert_eq!(
-            repo.ownership(&identity(&[ROOT_A, ROOT_C], "/repo/.git", "")),
+            repo.ownership(&identity(&[ROOT_A, ROOT_C], "/repo/.git", ""), false),
             Ownership::Ours
         );
     }
 
     #[test]
-    fn a_store_whose_roots_miss_every_stored_one_is_foreign() {
+    fn a_store_whose_roots_miss_every_stored_one_holding_none_of_our_work_is_foreign() {
+        // `rm -rf .git && git init`, or a different project cloned to the path.
         let repo = state(&[ROOT_A], "/repo/.git");
 
         assert_eq!(
-            repo.ownership(&identity(&[ROOT_B], "/repo/.git", "")),
+            repo.ownership(&identity(&[ROOT_B], "/repo/.git", ""), false),
             Ownership::Foreign
+        );
+    }
+
+    #[test]
+    fn a_store_whose_roots_moved_but_still_holds_our_work_is_rerooted() {
+        // `rebase --root`, an amend of the root commit, or `fetch --unshallow`.
+        let repo = state(&[ROOT_A], "/repo/.git");
+
+        assert_eq!(
+            repo.ownership(&identity(&[ROOT_B], "/repo/.git", ""), true),
+            Ownership::Rerooted
         );
     }
 
@@ -807,7 +826,7 @@ mod tests {
         let repo = state(&[ROOT_A], "/repo/.git");
 
         assert_eq!(
-            repo.ownership(&identity(&[], "/repo/.git", "")),
+            repo.ownership(&identity(&[], "/repo/.git", ""), false),
             Ownership::NotYet
         );
     }
@@ -818,15 +837,15 @@ mod tests {
         let repo = state(&[], "/repo/.git");
 
         assert_eq!(
-            repo.ownership(&identity(&[], "/repo/.git", "")),
+            repo.ownership(&identity(&[], "/repo/.git", ""), false),
             Ownership::Ours
         );
         assert_eq!(
-            repo.ownership(&identity(&[ROOT_A], "/repo/.git", "")),
+            repo.ownership(&identity(&[ROOT_A], "/repo/.git", ""), false),
             Ownership::Ours
         );
         assert_eq!(
-            repo.ownership(&identity(&[], "/elsewhere/.git", "")),
+            repo.ownership(&identity(&[], "/elsewhere/.git", ""), false),
             Ownership::Foreign
         );
     }

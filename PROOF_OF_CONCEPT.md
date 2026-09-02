@@ -57,13 +57,15 @@ The panes split 45/55, with the left one floored at 28 columns and capped at 40 
 more than the tail of a long label, and a repo row is worth more than an empty gutter.
 
 A dimmed `!` row is one that isn't earning: its git dir no longer resolves, or holds a different repo
-than the one recorded, leaving it [stale](#state); the filesystem holding it has stopped answering;
+than the one recorded, leaving it [stale](#state); its history was rewritten at the root; the
+filesystem holding it has stopped answering;
 it has no `user.email` to match commits against; its last scan failed; or the repo
 [appears twice](#state) and the other one is earning. It keeps its total in every case, and the right pane says which in place of the event list:
 
 ```
   this repo has moved or been deleted
   a different repo is at this path now
+  this repo's history was rewritten since you added it
   this repo's filesystem is not responding
   no user.email is set, so no commit can be matched
   last scan failed: fatal: not a git repository
@@ -72,8 +74,8 @@ it has no `user.email` to match commits against; its last scan failed; or the re
 ```
 
 A stale repo stays marked until its store turns up again, which the app checks for once a second. The
-`user.email` and scan marks lift on the next scan that reaches git, and a repo listed twice when
-either of the two is deleted.
+`user.email` and scan marks lift on the next scan that reaches git, a repo listed twice when either
+of the two is deleted, and a rewritten one when it is added again.
 
 A state file that doesn't load gets a dimmed row of its own, labelled by its filename. It is not a
 repo — no total, never scanned — and the right pane carries the reason it wouldn't load. `d` on it
@@ -151,6 +153,12 @@ between one scan and the next — `rm -rf /repo && git clone <other> /repo`, or 
 init` in place — and that store is live, watched, and full of commits with the right author email,
 so nothing a `stat` can see distinguishes it. The check costs one `rev-list` on a scan that already
 has two batched calls to make, and nothing on the scans that end above.
+
+A root can also change with the store untouched: `rebase --root`, an amend of the first commit,
+`filter-repo`, `fetch --unshallow`. A reflog still naming a SHA in `seen_shas` tells that from a
+replaced store, which can hold none of what was scored before it existed. Such a repo keeps its
+total, takes the `!`, and earns again once it is added a second time. A rewrite that expires the
+reflog too, as `filter-repo` does, reads as a replacement.
 
 **2 — stats.** Pipe those SHAs into one batched call:
 
@@ -354,10 +362,12 @@ before it writes a ref, so a probe every second lands inside that window, and th
 would hand the clone this row and its total. A state file holding no roots has never scored anything —
 the first scan to find one adopts it — so those keep the fallback and risk nothing by it.
 
-The resolve answers one of three ways, and they part company on what happens next. Roots that
+The resolve answers one of four ways, and they part company on what happens next. Roots that
 intersect are this repo, which un-stales and is watched again. No roots at all is a clone still
-writing, so the probe stays and asks a second later. Roots that resolved and missed every stored one
-are a different project, and that probe is dropped: the path will go on existing, and re-resolving it
+writing, so the probe stays and asks a second later. Roots that missed every stored one on a store
+still naming scored work are this repo rewritten: it un-stales into the `!` that asks to be added
+again, and the probe is dropped. Roots that missed every stored one
+are a different project, and that probe is dropped too: the path will go on existing, and re-resolving it
 every second forever costs a `rev-list` and a `rev-parse` each time to reach the same answer. The
 cost of dropping it is that moving the original repo back over that path changes nothing a `stat` can
 see, so it waits for `r` or a restart.
@@ -433,15 +443,15 @@ after    d9324e9 8201f79
 
 Under equality that repo would read as brand new and re-score its whole reflog at full value. Unrelated
 projects do not share a root commit, and clones of one upstream are held apart by the common dir, so
-intersection gives up nothing. Rewriting history at the root does empty it, and such a repo starts
-over.
+intersection gives up nothing. Rewriting history at the root does empty it, and such a repo reaches
+the picker on its live common dir.
 
 Where nothing matches but live state files already hold the resolved `git_common_dir`, the add
 goes to the picker — listing every one of them — instead of opening a new state file. One git dir under two state files would
-double-count: both would watch that reflog, and both would score it. Two situations arrive here — a repo
-re-initialised in place, and a different project cloned over a deleted one's path — and git cannot
-tell them apart, since in both the old objects are gone and only the path is shared. The first wants
-the existing row, the second a new one.
+double-count: both would watch that reflog, and both would score it. Three situations arrive here — a
+repo re-initialised in place, a different project cloned over a deleted one's path, and one whose
+history was rewritten at the root — and git cannot tell the first two apart, since in both the old
+objects are gone and only the path is shared. Only the cloned project wants a new row.
 
 | Situation | Result |
 | --- | --- |
@@ -452,6 +462,7 @@ the existing row, the second a new one.
 | a fork registered alongside its parent | separate state files — the parent's common dir still exists |
 | a linked worktree of a registered repo | joins that repo's state file as another `worktrees` entry |
 | an orphan branch adds a second root commit | still matches, on the intersection |
+| `rebase --root`, or an amend of the first commit | picker — the existing row keeps its total under the new roots |
 
 The `mv` and reused-path rows fail silently under any path-keyed scheme. A moved repo carries its
 `.git`, and therefore its whole reflog, along with it, and would bank every commit a second time at
@@ -771,6 +782,9 @@ And on state, identity and storage:
   nothing
 - `rm -rf .git && git init` in a registered repo, then commit — the commits score nowhere, and the
   row says the repo it recorded is gone rather than banking them into that total
+- `rebase --root` a registered repo, then commit — the commits score nowhere and the total is kept,
+  the row saying the history was rewritten rather than that a different repo is there; adding it
+  again takes the picker's existing row and it earns from the new history
 - `mv` it away and back with nothing else happening — it un-stales on its own within a couple of
   seconds and scores a commit made while it was gone
 - a `git clone` in flight into the path a stale repo left does not un-stale that row; a clone of the

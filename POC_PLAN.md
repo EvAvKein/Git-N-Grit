@@ -37,6 +37,7 @@ src/
   lib.rs      re-exports the modules below
   main.rs     bin `gng`: lock, second-instance screen, run
   lock.rs     .take exclusive lock, identity line, .takeover handover
+  event.rs    AppEvent: the one message type every thread sends the main loop
   git.rs      every subprocess: rev-parse, rev-list, config, var, the two batched scan calls
   reflog.rs   logs/HEAD → the SHAs it names (pure)
   probe.rs    the path a thread is inside a filesystem call on, and the wedge rule
@@ -123,11 +124,14 @@ Parsing is separate from spawning, so the parsers unit-test against fixture text
   in the answer is acted on only where stage 7 says: startup, an accepted add, `r`, and a report from
   the stale ticker. Each such change carries a watch to register or drop and a scan to queue, so a
   probe driving the render would clear a `!` with neither.
-- `RepoState::ownership(&RepoIdentity) -> Ownership` — whether the store now at this state's path is
-  the one it recorded. `Ours` when a root commit git just resolved is one the state file already
-  holds, or when the state holds no roots and the common dir matches. `NotYet` when git resolved no
-  roots at all and the state holds some. `Foreign` when what git resolved matches none of them. Only
-  `Ours` un-stales a repo or lets its commits score.
+- `RepoState::ownership(&RepoIdentity, holds_seen_commits) -> Ownership` — whether the store now at
+  this state's path is the one it recorded. `Ours` when a root commit git just resolved is one the
+  state file already holds, or when the state holds no roots and the common dir matches. `NotYet`
+  when git resolved no roots at all and the state holds some. `Rerooted` when what git resolved
+  matches none of them but the reflog still names a SHA in `seen_shas`, which a store created after
+  those commits were scored cannot. `Foreign` when it matches none of them and names none of them.
+  Only `Ours` un-stales a repo or lets its commits score; the caller passes the flag rather than the
+  method reaching for a reflog, so the rules test without a disk the way `match_identity`'s do.
 - `RepoState::scan_dir()` — the directory the scan's git calls are run in, which is not where its
   reflogs are read from: the first live worktree whose `source_dir` still exists, else
   `git_common_dir`, which serves `config`, `log --numstat` and `patch-id` with no working tree.
@@ -139,14 +143,15 @@ Parsing is separate from spawning, so the parsers unit-test against fixture text
 wedged thread never blocks on one. Both threads that touch the filesystem carry one: the ticker
 below, and stage 6's worker.
 
-`Ticker` takes a channel rather than the app's types, so it is built and tested before `app.rs`
-exists.
+`Ticker` sends into the same `Sender<AppEvent>` every other thread holds, `AppEvent` living in a leaf
+`event.rs` rather than in `app.rs` so this is built and tested before `app.rs` exists. `mpsc` cannot
+wait on two receivers, so a producer with a channel of its own would need a thread to forward it.
 
 ```rust
 pub struct Probe { pub id: Uuid, pub git_common_dir: PathBuf }
 
 impl Ticker {
-    pub fn spawn(interval: Duration, found: Sender<Vec<Uuid>>) -> Ticker;
+    pub fn spawn(interval: Duration, found: Sender<AppEvent>) -> Ticker;
     pub fn set_probes(&self, probes: Vec<Probe>);      // replaces the set, unparks if non-empty
     pub fn wedged(&self, limit: Duration) -> Option<PathBuf>;
     pub fn abandon(self);                              // stops without joining
@@ -166,25 +171,37 @@ parked, `set_probes` waking a parked ticker, and `abandon` ending the thread —
 sender it drops. `probe.rs` tests the wedge rule directly, as a pure function of a start `Instant`
 and a limit: a real hung stat is not something a test can produce, so that path is checked by hand.
 
-## 6 — `scan.rs`
+## 6 — `scan.rs` ✅
 
-The only thread that stats a path or spawns `git`. Jobs are `Scan(ScanJob)` and `Resolve { path, seq }`.
+The only thread that stats a path or spawns `git`. Jobs are `Scan(Box<RepoState>)` and
+`Resolve { seq, path, states }`.
 
-`ScanJob { id, worktrees, seen_shas, seen_patch_ids }` → `ScanDelta { id, events, xp_earned,
-new_shas, new_patch_ids, adopted_roots, no_email: Option<bool>, stale, watch }`. The job carries
-cloned seen-sets, so the worker shares nothing with the main thread; at a few thousand SHAs the clone
-is microseconds, and it happens off the render path. `stale` and `watch` are the liveness it resolved
-on the way in: a job goes to every repo, not every live one, and a stale store returns at step 0.
+The job carries the whole state, cloned, so the worker shares nothing with the main thread and can
+call `is_stale`, `live_worktrees`, `ownership` and `scan_dir` on it — the methods stage 4 already
+documents as the worker's. At a few thousand SHAs and at most 200 events the clone is microseconds,
+off the render path.
+
+`ScanDelta { events, new_shas, new_patch_ids, adopted_roots, no_email: Option<bool>,
+ownership: Option<Ownership>, stale, watch }`. No `xp_earned`: `RepoState::record` already returns
+what it banked and keeps `total_xp` whole across the events cap, and every commit that earns emits an
+event. `stale` and `watch` are the liveness it resolved on the way in: a job goes to every repo, not
+every live one, and a stale store returns at step 0. `watch` is the resolved directory per live
+worktree — its `logs`, or its git dir where no `logs/` exists yet — since deciding that is a `stat`.
 
 `Resolve` answers `AppEvent::Resolved { seq, result }` for the add prompt, `seq` being the prompt's
-generation, so an answer to a prompt that has moved on is dropped.
+generation, so an answer to a prompt that has moved on is dropped. It runs `state::match_identity`
+with the liveness closure bracketed, because any one of the candidate stores can be the one that
+hangs.
 
 It holds a `probe::InFlight` and is abandoned and replaced as the ticker is, taking its queue with
-it, so the app re-posts every job it has no delta for.
+it, so the app re-posts every job it has no delta for. `Worker::spawn(tx) -> (Worker, Sender<Job>)`
+mirrors `Ticker`, the handle carrying `wedged` and `abandon`; dropping the job sender alongside it is
+what unblocks a worker waiting on an empty queue.
 
-`no_email` is `Option` because step 2 returns before the question is ever asked. `None` means the
-scan didn't determine it and the previous answer stands — without that, the `!` would clear on the
-first scan that found nothing new, which is nearly every scan.
+`no_email` and `ownership` are `Option` because step 2 returns before either question is asked.
+`None` means the scan didn't determine it and the previous answer stands — without that, the `!`
+would clear on the first scan that found nothing new, which is nearly every scan. `ownership` being
+`None` is also how a test tells that a scan reached git not at all.
 
 0. `is_stale`, then `live_worktrees`. Stale ⇒ return `stale: true` and stop.
 1. Pool `logs/HEAD` from every live worktree git dir through `reflog::extract_shas`.
@@ -203,16 +220,16 @@ first scan that found nothing new, which is nearly every scan.
    dropped. They go into `new_shas` with no patch-id and no event, so the next scan doesn't spend two
    batched git calls on a SHA whose object is gone.
 
-`spawn_worker(rx: Receiver<Job>, tx: Sender<AppEvent>)` runs the above and sends
-`AppEvent::ScanDone(id, Result<ScanDelta>)`.
+The worker sends `AppEvent::ScanDone(id, Result<ScanDelta>)`. `run_scan(&RepoState)` and
+`run_resolve(path, states)` are the same bodies, public so tests drive them with no thread, channel
+or timing in the way, and `apply(&mut RepoState, ScanDelta) -> u64` banks a delta exactly as stage 7
+will — the tests use it rather than a helper that could drift from it.
 
 ## 7 — `app.rs`
 
+`AppEvent` is stage 6's, in `event.rs`. What this stage adds:
+
 ```rust
-enum AppEvent {
-    Input(CtEvent), Fs(Vec<PathBuf>), ScanDone(Uuid, Result<ScanDelta>), Returned(Vec<Uuid>),
-    Resolved { seq: u64, result: Result<(RepoIdentity, Match)> },
-}
 enum Mode { List, AddPrompt { input, error, checking: bool }, Picker { identity, candidates, sel }, ConfirmRemove { target, sel } }
 enum Row { Add, Repo(Uuid), BadFile(PathBuf) }   // also the remove target
 ```
@@ -329,13 +346,27 @@ The stale ticker's own tests pass a millisecond interval; the integration tests 
 at the app's one second and allow for it.
 
 Integration tests in `tests/` over throwaway repos built with `git init` in a temp dir, covering the
-spec's three lists — scan behaviour, state and identity and storage, and running twice.
+spec's three lists — scan behaviour, state and identity and storage, and running twice. The scan
+list and `tests/common/` are stage 6's, since the scan is the part defined by how `git` actually
+behaves; the other two lists follow their own stages.
 
-A `tests/common/` helper carries both isolations, since neither survives being left to a test to
-remember. It runs every git call with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at `/dev/null` and
-the four identity variables set explicitly, and it hands back a `Storage` rooted in the test's own
-temp dir. The running-twice tests spawn the built binary — `env!("CARGO_BIN_EXE_gng")` — with
-`--storage=<that temp dir>`.
+`tests/common/` carries the isolation, since it does not survive being left to a test to remember,
+and it takes two forms because a test can set the environment of the git calls *it* makes but not of
+the ones `gng` makes. Those inherit the test binary's environment, and `std::env::set_var` is
+`unsafe` in edition 2024 and races every other test in the binary.
+
+- Calls the test makes get `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at `/dev/null` and the four
+  identity variables, set per `Command`.
+- Calls the library makes are covered by repo-local config written at `git init` — `user.email`,
+  `commit.gpgsign`, `log.showSignature`, `core.hooksPath` at an empty dir — since local config beats
+  a real `~/.gitconfig`'s.
+
+The one case that only approximates is "no `user.email` set anywhere": local config cannot unset a
+global value, so the test sets an empty one, which `git config user.email` answers with nothing and
+`git::user_email` reads as `None` by the same path as an unset key.
+
+The helper also hands back a `Storage` rooted in the test's own temp dir. The running-twice tests
+spawn the built binary — `env!("CARGO_BIN_EXE_gng")` — with `--storage=<that temp dir>`.
 
 ## Verification
 

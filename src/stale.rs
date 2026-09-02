@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use crate::event::AppEvent;
 use crate::probe::InFlight;
 
 /// One stale store: the dir to stat, and the state file it answers for.
@@ -39,7 +40,7 @@ pub struct Ticker {
 impl Ticker {
     /// Spawn parked. The `JoinHandle` is dropped deliberately: a stat that never
     /// returns must not be something the app can wait on.
-    pub fn spawn(interval: Duration, found: Sender<Vec<Uuid>>) -> Ticker {
+    pub fn spawn(interval: Duration, found: Sender<AppEvent>) -> Ticker {
         let shared = Arc::new(Shared::default());
         let handle = {
             let shared = Arc::clone(&shared);
@@ -75,7 +76,7 @@ impl Ticker {
     }
 }
 
-fn run(shared: &Shared, interval: Duration, found: Sender<Vec<Uuid>>) {
+fn run(shared: &Shared, interval: Duration, found: Sender<AppEvent>) {
     loop {
         if shared.stop.load(Ordering::Relaxed) {
             return;
@@ -102,7 +103,7 @@ fn run(shared: &Shared, interval: Duration, found: Sender<Vec<Uuid>>) {
         }
 
         // A dropped receiver is the app going away.
-        if !back.is_empty() && found.send(back).is_err() {
+        if !back.is_empty() && found.send(AppEvent::Returned(back)).is_err() {
             return;
         }
         thread::park_timeout(interval);
@@ -146,6 +147,16 @@ mod tests {
     const QUICK: Duration = Duration::from_millis(10);
     const SLACK: Duration = Duration::from_secs(2);
 
+    /// The ids one report carries. `AppEvent` holds an `anyhow::Error` and so
+    /// cannot derive `PartialEq`, which is why these are not `assert_eq`s on
+    /// the event itself.
+    fn returned(event: AppEvent) -> Vec<Uuid> {
+        match event {
+            AppEvent::Returned(ids) => ids,
+            other => panic!("expected Returned, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_store_that_comes_back_is_reported() {
         let temp = TempRoot::new();
@@ -156,7 +167,10 @@ mod tests {
         ticker.set_probes(vec![probe.clone()]);
         fs::create_dir(&probe.git_common_dir).expect("creating the store");
 
-        assert_eq!(rx.recv_timeout(SLACK), Ok(vec![probe.id]));
+        assert_eq!(
+            returned(rx.recv_timeout(SLACK).expect("a report")),
+            vec![probe.id]
+        );
     }
 
     #[test]
@@ -172,7 +186,7 @@ mod tests {
 
     #[test]
     fn an_empty_set_parks_rather_than_spinning() {
-        let (tx, rx) = mpsc::channel::<Vec<Uuid>>();
+        let (tx, rx) = mpsc::channel::<AppEvent>();
         let _ticker = Ticker::spawn(QUICK, tx);
 
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
@@ -189,29 +203,32 @@ mod tests {
 
         ticker.set_probes(vec![probe.clone()]);
 
-        assert_eq!(rx.recv_timeout(SLACK), Ok(vec![probe.id]));
+        assert_eq!(
+            returned(rx.recv_timeout(SLACK).expect("a report")),
+            vec![probe.id]
+        );
     }
 
     #[test]
     fn abandoning_ends_the_thread() {
         let temp = TempRoot::new();
-        let (tx, rx) = mpsc::channel::<Vec<Uuid>>();
+        let (tx, rx) = mpsc::channel::<AppEvent>();
         let ticker = Ticker::spawn(Duration::from_secs(600), tx);
         ticker.set_probes(vec![temp.probe("gone.git")]);
 
         ticker.abandon();
 
         // The thread owns the sender, so a disconnect is it having returned.
-        assert_eq!(
+        assert!(matches!(
             rx.recv_timeout(SLACK),
             Err(mpsc::RecvTimeoutError::Disconnected)
-        );
+        ));
     }
 
     /// The rule itself is [`crate::probe`]'s; this is the wiring to it.
     #[test]
     fn a_ticker_that_has_stat_ed_nothing_is_never_wedged() {
-        let (tx, _rx) = mpsc::channel::<Vec<Uuid>>();
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
         let ticker = Ticker::spawn(Duration::from_secs(600), tx);
 
         assert_eq!(ticker.wedged(Duration::ZERO), None);
