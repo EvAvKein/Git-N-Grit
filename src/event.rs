@@ -11,9 +11,7 @@ use anyhow::Result;
 use ratatui::crossterm::event::Event as CtEvent;
 use uuid::Uuid;
 
-use crate::git::RepoIdentity;
-use crate::scan::ScanDelta;
-use crate::state::Match;
+use crate::scan::{Resolved, ScanDelta};
 
 /// Everything that can reach the main loop.
 #[derive(Debug)]
@@ -24,14 +22,17 @@ pub enum AppEvent {
     /// that maps them back to repos is the main thread's.
     Fs(Vec<PathBuf>),
     /// A scan finished. `Err` leaves the total alone and takes the row's `!`.
-    ScanDone(Uuid, Result<ScanDelta>),
+    /// `incarnation` is the worker's, so a delta from one that has been
+    /// abandoned is dropped rather than banked beside the job that replaced it.
+    ScanDone {
+        incarnation: u64,
+        id: Uuid,
+        result: Result<ScanDelta>,
+    },
     /// Stale stores whose common dir has reappeared. Whether one is *ours* is
     /// the scan that follows to answer.
     Returned(Vec<Uuid>),
     /// The add prompt's path resolved. `seq` is the prompt's generation, so an
     /// answer to a prompt that has moved on is dropped.
-    Resolved {
-        seq: u64,
-        result: Result<(RepoIdentity, Match)>,
-    },
+    Resolved { seq: u64, result: Result<Resolved> },
 }

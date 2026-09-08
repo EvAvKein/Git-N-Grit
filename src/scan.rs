@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::event::AppEvent;
 use crate::git::{self, CommitInfo, RepoIdentity};
@@ -32,7 +32,12 @@ const DELETED_WEIGHT: u64 = 3;
 pub enum Job {
     /// Scan this store. The whole state is cloned in, so the worker shares
     /// nothing with the main thread and needs nothing back to do its job.
-    Scan(Box<RepoState>),
+    Scan {
+        state: Box<RepoState>,
+        /// Whether to resolve the identity even where there is nothing to score,
+        /// which is what a row the app does not hold as ours needs answered.
+        verify_ownership: bool,
+    },
     /// Resolve a path typed at the add prompt, against what is registered.
     Resolve {
         /// The prompt's generation. An answer to a prompt that has moved on is
@@ -60,8 +65,8 @@ pub struct ScanDelta {
     /// Each SHA scored this pass, zero-XP entries included.
     pub new_awarded: Vec<Awarded>,
     pub new_patch_ids: Vec<String>,
-    /// Set only where the state held none and git resolved some.
-    pub adopted_roots: Option<Vec<String>>,
+    /// The roots this scan resolved. Empty where git found none.
+    pub resolved_roots: Option<Vec<String>>,
     /// `None` where the scan ended before it could ask, which is most scans.
     /// The previous answer stands, or the `!` would blink off a repo that
     /// still cannot earn.
@@ -76,6 +81,15 @@ pub struct ScanDelta {
     /// dir where no `logs/` exists yet. Resolving that is a `stat`, so it is
     /// answered here rather than on the main thread.
     pub watch: Vec<PathBuf>,
+}
+
+/// What one repo addition resolved to, before anything is registered.
+#[derive(Debug)]
+pub struct Resolved {
+    /// The typed path made absolute, which is what a worktree entry stores.
+    pub source_dir: PathBuf,
+    pub identity: RepoIdentity,
+    pub matched: Match,
 }
 
 #[derive(Default)]
@@ -93,12 +107,15 @@ impl Worker {
     /// Spawn the worker and hand back the queue to post jobs on. The
     /// `JoinHandle` is dropped deliberately: a `git` call on a dead mount must
     /// not be something the app can wait on.
-    pub fn spawn(tx: Sender<AppEvent>) -> (Worker, Sender<Job>) {
+    ///
+    /// `incarnation` is stamped on every delta this worker sends, so a delta
+    /// from one abandoned since is told from the job that replaced it.
+    pub fn spawn(tx: Sender<AppEvent>, incarnation: u64) -> (Worker, Sender<Job>) {
         let (jobs_tx, jobs_rx) = channel();
         let shared = Arc::new(Shared::default());
         {
             let shared = Arc::clone(&shared);
-            thread::spawn(move || run(&shared, &jobs_rx, &tx));
+            thread::spawn(move || run(&shared, incarnation, &jobs_rx, &tx));
         }
         (Worker { shared }, jobs_tx)
     }
@@ -119,14 +136,21 @@ impl Worker {
     }
 }
 
-fn run(shared: &Shared, jobs: &Receiver<Job>, tx: &Sender<AppEvent>) {
+fn run(shared: &Shared, incarnation: u64, jobs: &Receiver<Job>, tx: &Sender<AppEvent>) {
     while let Ok(job) = jobs.recv() {
         if shared.stop.load(Ordering::Relaxed) {
             return;
         }
 
         let event = match job {
-            Job::Scan(state) => AppEvent::ScanDone(state.id, scan(&state, &shared.in_flight)),
+            Job::Scan {
+                state,
+                verify_ownership,
+            } => AppEvent::ScanDone {
+                incarnation,
+                id: state.id,
+                result: scan(&state, verify_ownership, &shared.in_flight),
+            },
             Job::Resolve { seq, path, states } => AppEvent::Resolved {
                 seq,
                 result: resolve(&path, &states, &shared.in_flight),
@@ -143,15 +167,21 @@ fn run(shared: &Shared, jobs: &Receiver<Job>, tx: &Sender<AppEvent>) {
 /// One scan of one store. Public so tests drive it with no thread, channel or
 /// timing in the way.
 pub fn run_scan(state: &RepoState) -> Result<ScanDelta> {
-    scan(state, &InFlight::default())
+    scan(state, false, &InFlight::default())
+}
+
+/// A scan that resolves the identity whether or not anything is left to score,
+/// which is what a row the app does not hold as ours is asked for.
+pub fn run_verify(state: &RepoState) -> Result<ScanDelta> {
+    scan(state, true, &InFlight::default())
 }
 
 /// Resolve a typed path and place it against what is registered.
-pub fn run_resolve(path: &Path, states: &[RepoState]) -> Result<(RepoIdentity, Match)> {
+pub fn run_resolve(path: &Path, states: &[RepoState]) -> Result<Resolved> {
     resolve(path, states, &InFlight::default())
 }
 
-fn scan(state: &RepoState, in_flight: &InFlight) -> Result<ScanDelta> {
+fn scan(state: &RepoState, verify_ownership: bool, in_flight: &InFlight) -> Result<ScanDelta> {
     let mut delta = ScanDelta::default();
 
     // One bracket for every path read here — all under the store's dir, and
@@ -172,7 +202,7 @@ fn scan(state: &RepoState, in_flight: &InFlight) -> Result<ScanDelta> {
         .filter(|sha| !state.awarded.contains_key(*sha))
         .cloned()
         .collect();
-    if to_score.is_empty() {
+    if to_score.is_empty() && !verify_ownership {
         return Ok(delta); // git is not reached at all
     }
     // Anything subtracted was scored into this state before this store could
@@ -188,8 +218,12 @@ fn scan(state: &RepoState, in_flight: &InFlight) -> Result<ScanDelta> {
     if ownership != Ownership::Ours {
         return Ok(delta);
     }
-    if state.root_commits.is_empty() && !identity.root_commits.is_empty() {
-        delta.adopted_roots = Some(identity.root_commits);
+    delta.resolved_roots = Some(identity.root_commits);
+
+    // Whose it is was all this scan was asked for. The roots above still go
+    // back: a repo registered before its first commit has none stored.
+    if to_score.is_empty() {
+        return Ok(delta);
     }
 
     // Read per scan and never stored, so changing your identity takes effect
@@ -215,18 +249,24 @@ fn scan(state: &RepoState, in_flight: &InFlight) -> Result<ScanDelta> {
     Ok(delta)
 }
 
-fn resolve(
-    path: &Path,
-    states: &[RepoState],
-    in_flight: &InFlight,
-) -> Result<(RepoIdentity, Match)> {
-    let identity = watching(in_flight, path, || git::resolve_identity(path))?;
+fn resolve(path: &Path, states: &[RepoState], in_flight: &InFlight) -> Result<Resolved> {
+    // Absolute before git runs, so the stored path survives a later start from
+    // another directory and names the same place the identity was read from.
+    let source_dir = watching(in_flight, path, || fs::canonicalize(path))
+        .with_context(|| format!("resolving {}", path.display()))?;
+    let identity = watching(in_flight, &source_dir, || {
+        git::resolve_identity(&source_dir)
+    })?;
     // Each candidate's store is stat-ed, and any of them can be the one that
     // hangs, so the bracket follows the path being asked about.
     let matched = match_identity(states, &identity, |dir| {
         watching(in_flight, dir, || dir.exists())
     });
-    Ok((identity, matched))
+    Ok(Resolved {
+        source_dir,
+        identity,
+        matched,
+    })
 }
 
 /// What one pass under the common dir yields.
@@ -390,7 +430,11 @@ fn score(
 /// Writing the state file is the main thread's, as are the markers that live
 /// only in memory: the `!`, the stored scan error, the watch table.
 pub fn apply(state: &mut RepoState, delta: ScanDelta) -> u64 {
-    if let Some(roots) = delta.adopted_roots {
+    // A commitless repo resolves an empty set; overwriting the stored roots
+    // with it would stop the repo matching itself until its first commit.
+    if let Some(roots) = delta.resolved_roots
+        && !roots.is_empty()
+    {
         state.root_commits = roots;
     }
     state

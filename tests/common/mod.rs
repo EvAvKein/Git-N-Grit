@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use gng::git::resolve_identity;
-use gng::scan::{ScanDelta, apply, run_scan};
+use gng::scan::{ScanDelta, apply, run_scan, run_verify};
 use gng::state::RepoState;
 use uuid::Uuid;
 
@@ -171,6 +171,11 @@ pub fn scan(state: &mut RepoState) -> u64 {
 /// The delta alone, for the cases that assert on what a scan did *not* do.
 pub fn delta(state: &RepoState) -> ScanDelta {
     run_scan(state).expect("a scan")
+}
+
+/// The delta of a scan asked to resolve the identity whatever it finds.
+pub fn verify(state: &RepoState) -> ScanDelta {
+    run_verify(state).expect("a verifying scan")
 }
 
 /// A scan that ended at step 2 never resolved an identity, which is the mark

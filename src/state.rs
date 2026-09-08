@@ -37,14 +37,27 @@ pub struct RepoState {
     pub seen_patch_ids: BTreeSet<String>,
     pub worktrees: Vec<Worktree>,
     pub events: Vec<Event>,
-    /// The filename, minus `.json`. Not a field of the file: nothing locates a
-    /// repo by it, and only `Storage` needs it to write back.
+    // Out of the file by design: persisted, any of these would be stale at startup.
+    /// The filename, minus `.json`. Nothing locates a repo by it, and only
+    /// `Storage` needs it to write back.
     #[serde(skip)]
     pub id: Uuid,
-    /// Whether another state file names this store too. Read from the files on
-    /// disk at load, so no more a field of one of them than `id` is.
+    /// Whether another state file names this store too. Read from the file names
+    /// on disk at load.
     #[serde(skip)]
     pub duplicate: Duplicate,
+    /// Whether the object store's common dir is missing from disk.
+    #[serde(skip)]
+    pub stale: bool,
+    /// Who the store at this path belongs to. `None` until a scan has judged it.
+    #[serde(skip)]
+    pub ownership: Option<Ownership>,
+    /// Whether `user.email` was unset, last time a scan looked.
+    #[serde(skip)]
+    pub no_email: bool,
+    /// Why the most recent action on this repo failed.
+    #[serde(skip)]
+    pub error: Option<String>,
 }
 
 /// Whether one object store is named by more than one state file.
@@ -128,6 +141,10 @@ impl RepoState {
             events: Vec::new(),
             id: Uuid::new_v4(),
             duplicate: Duplicate::None,
+            stale: false,
+            ownership: None,
+            no_email: false,
+            error: None,
         }
     }
 
@@ -665,8 +682,9 @@ mod tests {
 
     #[test]
     fn every_state_on_a_registered_git_dir_reaches_the_picker() {
-        // Two rows come to share a git dir when an earlier pick answered "new
-        // repo". A third history over it has to be able to land on either.
+        // Two rows come to share a git dir when a state file is copied, or
+        // when one is adopted onto a path another already holds. A third
+        // history over it has to be able to land on either.
         let first = state(&[ROOT_A], "/repo/.git");
         let second = state(&[ROOT_B], "/repo/.git");
         let ids = vec![first.id, second.id];

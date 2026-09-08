@@ -5,7 +5,7 @@ mod common;
 
 use std::fs;
 
-use common::{Fixture, MINE, THEIRS, delta, reached_git, scan};
+use common::{Fixture, MINE, THEIRS, delta, reached_git, scan, verify};
 use gng::scan::{apply, run_scan};
 use gng::state::Ownership;
 
@@ -392,6 +392,45 @@ fn a_store_replaced_in_place_is_foreign_and_inherits_nothing() {
 
     apply(&mut state, d);
     assert_eq!(state.total_xp, earned);
+}
+
+/// The cheap path returns before it asks whose the store is. A row the app does
+/// not hold as ours — its store gone, or last read as someone else's — needs
+/// that answer with nothing left to score, or it never leaves that state.
+#[test]
+fn a_verifying_scan_says_whose_the_store_is_with_nothing_left_to_score() {
+    let fx = Fixture::new();
+    let repo = fx.repo("work");
+    repo.commit_file("a.txt", "one\n", "first");
+    let mut state = repo.state();
+    let earned = scan(&mut state);
+
+    let d = verify(&state);
+
+    assert_eq!(d.ownership, Some(Ownership::Ours));
+    assert!(d.events.is_empty());
+    assert_eq!(d.resolved_roots, Some(state.root_commits.clone()));
+    apply(&mut state, d);
+    assert_eq!(state.total_xp, earned);
+}
+
+#[test]
+fn a_verifying_scan_takes_the_roots_of_a_repo_that_had_none() {
+    let fx = Fixture::new();
+    let repo = fx.repo("empty");
+    // Registered before its first commit, so no roots are stored to match on.
+    let mut state = repo.state();
+    assert!(state.root_commits.is_empty());
+
+    let first = repo.commit_file("a.txt", "one\n", "first");
+    // Scored already, so an ordinary scan returns before asking anything.
+    state.awarded.insert(first.clone(), 0);
+    assert!(!reached_git(&delta(&state)));
+
+    let d = verify(&state);
+
+    assert_eq!(d.ownership, Some(Ownership::Ours));
+    assert_eq!(d.resolved_roots, Some(vec![first]));
 }
 
 #[test]
