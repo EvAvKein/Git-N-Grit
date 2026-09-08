@@ -38,7 +38,7 @@ fn another_authors_commit_earns_nothing_and_is_never_listed() {
     assert_eq!(scan(&mut state), 0);
     assert!(state.events.iter().all(|e| e.subject != "their work"));
     // Recorded all the same, so a rewrite of it reads as cleanup.
-    assert!(state.seen_shas.contains(&theirs));
+    assert_eq!(state.awarded.get(&theirs), Some(&0));
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn a_merge_is_never_listed_and_the_scan_after_it_reaches_git_not_at_all() {
 
     assert!(state.events.iter().all(|e| e.subject != "Merge side"));
     // Its SHA is recorded, or it comes back on every scan until it expires.
-    assert!(state.seen_shas.contains(&merge));
+    assert_eq!(state.awarded.get(&merge), Some(&0));
     assert!(!reached_git(&delta(&state)));
 }
 
@@ -192,7 +192,7 @@ fn a_reflog_expired_away_leaves_head_unscored() {
     // Handed no SHAs, both batched calls would fall back to HEAD and score a
     // commit no reflog named.
     assert_eq!(scan(&mut state), 0);
-    assert!(state.seen_shas.is_empty());
+    assert!(state.awarded.is_empty());
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn a_branch_tip_merged_back_is_scored_once_across_two_reflogs() {
     assert_eq!(earned, 2);
 
     // The tip lands in main's reflog too, with one parent, so nothing skips it
-    // as a merge. One seen_shas across the store is what makes it count once.
+    // as a merge. One `awarded` across the store is what makes it count once.
     repo.run(&["merge", "--ff-only", "feature"]);
 
     assert_eq!(scan(&mut state), 0);
@@ -344,7 +344,7 @@ fn a_reflog_naming_a_pruned_object_scans_cleanly_and_is_not_asked_twice() {
 
     let d = delta(&state);
     assert!(d.events.is_empty());
-    assert!(d.new_shas.iter().any(|sha| sha == ghost));
+    assert!(d.new_awarded.iter().any(|a| a.sha == ghost && a.xp == 0));
 
     apply(&mut state, d);
     // Recorded, so the next scan spends no batched call skipping it again.
@@ -392,6 +392,31 @@ fn a_store_replaced_in_place_is_foreign_and_inherits_nothing() {
 
     apply(&mut state, d);
     assert_eq!(state.total_xp, earned);
+}
+
+#[test]
+fn what_was_awarded_sums_to_the_total() {
+    let fx = Fixture::new();
+    let repo = fx.repo("work");
+    repo.commit_file("a.txt", "one\ntwo\n", "first");
+    let mut state = repo.state();
+    scan(&mut state);
+
+    // Everything that records without scoring: another author's, and a merge.
+    repo.write("b.txt", "theirs\n");
+    repo.commit_as(THEIRS, "their work");
+    repo.run(&["checkout", "-q", "-b", "side"]);
+    repo.commit_file("c.txt", "side\n", "side work");
+    repo.run(&["checkout", "-q", "main"]);
+    repo.run(&["merge", "--no-ff", "-m", "Merge side", "side"]);
+    scan(&mut state);
+
+    repo.commit_file("d.txt", "four\n", "fourth");
+    repo.run(&["commit", "--amend", "-m", "fourth, reworded"]);
+    scan(&mut state);
+
+    assert!(state.total_xp > 0);
+    assert_eq!(state.awarded.values().sum::<u64>(), state.total_xp);
 }
 
 #[test]

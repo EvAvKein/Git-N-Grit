@@ -43,13 +43,22 @@ pub enum Job {
     },
 }
 
+/// One SHA the scan ran through scoring, and the XP it was awarded — zero for a
+/// merge, another author's commit, or an object gc pruned.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Awarded {
+    pub sha: String,
+    pub xp: u64,
+}
+
 /// What one scan found. Applying it is [`apply`]; the markers it feeds — the
 /// `!`, the watch table — are the main thread's.
 #[derive(Debug, Default)]
 pub struct ScanDelta {
     /// In `ct` order, as scored, so appending keeps storage chronological.
     pub events: Vec<Event>,
-    pub new_shas: Vec<String>,
+    /// Each SHA scored this pass, zero-XP entries included.
+    pub new_awarded: Vec<Awarded>,
     pub new_patch_ids: Vec<String>,
     /// Set only where the state held none and git resolved some.
     pub adopted_roots: Option<Vec<String>>,
@@ -145,9 +154,8 @@ pub fn run_resolve(path: &Path, states: &[RepoState]) -> Result<(RepoIdentity, M
 fn scan(state: &RepoState, in_flight: &InFlight) -> Result<ScanDelta> {
     let mut delta = ScanDelta::default();
 
-    // 0 and 1 — every path here is the store's own, so one bracket covers
-    // them. It names the store rather than the worktree, which is the
-    // granularity the app drops work at anyway.
+    // One bracket for every path read here — all under the store's dir, and
+    // the app abandons wedged work per store.
     let Some(store) = watching(in_flight, &state.git_common_dir, || {
         (!state.is_stale()).then(|| read_store(state))
     }) else {
@@ -156,12 +164,12 @@ fn scan(state: &RepoState, in_flight: &InFlight) -> Result<ScanDelta> {
     };
     delta.watch = store.watch;
 
-    // 2 — what the reflogs name that has not already been processed. Cost from
+    // What the reflogs name that has not already been processed. Cost from
     // here scales with what is left to score, not with the reflogs' size.
     let named = reflog::extract_shas(&store.reflogs);
     let to_score: Vec<String> = named
         .iter()
-        .filter(|sha| !state.seen_shas.contains(*sha))
+        .filter(|sha| !state.awarded.contains_key(*sha))
         .cloned()
         .collect();
     if to_score.is_empty() {
@@ -184,25 +192,15 @@ fn scan(state: &RepoState, in_flight: &InFlight) -> Result<ScanDelta> {
         delta.adopted_roots = Some(identity.root_commits);
     }
 
-    // 3 — read per scan and never stored, so changing your identity takes
-    // effect on the next scan with nothing to migrate.
+    // Read per scan and never stored, so changing your identity takes effect
+    // on the next scan with nothing to migrate.
     let email = watching(in_flight, &dir, || git::user_email(&dir))?;
     delta.no_email = Some(email.is_none());
 
-    // 4 — two batched calls over the same list.
+    // Two batched calls over the same list.
     let commits = watching(in_flight, &dir, || git::numstat(&dir, &to_score))?;
     let patch_ids = watching(in_flight, &dir, || git::patch_ids(&dir, &to_score))?;
 
-    // 6 — SHAs `--ignore-missing` dropped, whose objects gc has pruned. Taken
-    // before scoring consumes the commits.
-    let returned: HashSet<&str> = commits.iter().map(|c| c.sha.as_str()).collect();
-    let missing: Vec<String> = to_score
-        .iter()
-        .filter(|sha| !returned.contains(sha.as_str()))
-        .cloned()
-        .collect();
-
-    // 5
     let scored = score(
         commits,
         &to_score,
@@ -212,10 +210,7 @@ fn scan(state: &RepoState, in_flight: &InFlight) -> Result<ScanDelta> {
     );
     delta.events = scored.events;
     delta.new_patch_ids = scored.new_patch_ids;
-    delta.new_shas = scored.new_shas;
-    // Recorded with no patch-id and no event, so the next scan spends no
-    // batched call skipping them again.
-    delta.new_shas.extend(missing);
+    delta.new_awarded = scored.new_awarded;
 
     Ok(delta)
 }
@@ -261,7 +256,9 @@ fn read_store(state: &RepoState) -> Store {
 
         // It has to be the directory: expire and gc rename `HEAD.lock` over
         // `HEAD`, which leaves a watch on the file holding an orphaned inode.
-        store.watch.push(if logs.is_dir() { logs } else { head_dir });
+        store
+            .watch
+            .push(if logs.is_dir() { logs } else { head_dir });
     }
 
     store
@@ -279,17 +276,17 @@ fn watching<T>(in_flight: &InFlight, path: &Path, touch: impl FnOnce() -> T) -> 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Scored {
     events: Vec<Event>,
-    new_shas: Vec<String>,
+    new_awarded: Vec<Awarded>,
     new_patch_ids: Vec<String>,
 }
 
 /// Walk the commits in `ct` order and price them.
 ///
-/// `order` is step 1's first-seen order, which breaks a tie on `ct` — a rebase
-/// stamps several commits with the same second. Reflog order alone cannot do
-/// the job: it is chronological within one file, but across pooled reflogs it
-/// is one worktree's whole history and then another's, which can present a
-/// rewrite before the commit it rewrites.
+/// `order` is the SHAs in first-seen order, which breaks a tie on `ct` — a
+/// rebase stamps several commits with the same second. Reflog order alone
+/// cannot do the job: it is chronological within one file, but across pooled
+/// reflogs it is one worktree's whole history and then another's, which can
+/// present a rewrite before the commit it rewrites.
 fn score(
     mut commits: Vec<CommitInfo>,
     order: &[String],
@@ -319,12 +316,14 @@ fn score(
     let mut paid: HashSet<&str> = seen_patch_ids.iter().map(String::as_str).collect();
 
     for commit in commits {
-        // Recorded whatever happens next: one left out comes back on every
+        // Merges score nothing, take no patch-id and are never listed. Still
+        // recorded, as every arm below is: one left out comes back on every
         // scan until its reflog entry expires.
-        scored.new_shas.push(commit.sha.clone());
-
-        // Merges score nothing, take no patch-id and are never listed.
         if commit.is_merge {
+            scored.new_awarded.push(Awarded {
+                sha: commit.sha,
+                xp: 0,
+            });
             continue;
         }
 
@@ -342,6 +341,10 @@ fn score(
         // Another author's work is recorded, so a rewrite of it counts as
         // cleanup, but never listed: a shared repo's pane stays your own.
         if !email.is_some_and(|mine| mine.eq_ignore_ascii_case(&commit.author_email)) {
+            scored.new_awarded.push(Awarded {
+                sha: commit.sha,
+                xp: 0,
+            });
             continue;
         }
 
@@ -350,6 +353,10 @@ fn score(
         } else {
             commit.added + DELETED_WEIGHT * commit.deleted
         };
+        scored.new_awarded.push(Awarded {
+            sha: commit.sha.clone(),
+            xp,
+        });
         scored.events.push(Event {
             sha: commit.sha,
             timestamp: commit.committed_timestamp,
@@ -360,6 +367,20 @@ fn score(
             rewrite,
         });
     }
+
+    // A SHA `--ignore-missing` dropped — its object gc pruned — is recorded at
+    // zero all the same, or the next scan spends both batched calls re-fetching
+    // it. The loop above covered what git returned; this is the rest of `order`.
+    let returned: HashSet<&str> = scored.new_awarded.iter().map(|a| a.sha.as_str()).collect();
+    let dropped: Vec<Awarded> = order
+        .iter()
+        .filter(|sha| !returned.contains(sha.as_str()))
+        .map(|sha| Awarded {
+            sha: sha.clone(),
+            xp: 0,
+        })
+        .collect();
+    scored.new_awarded.extend(dropped);
 
     scored
 }
@@ -372,7 +393,9 @@ pub fn apply(state: &mut RepoState, delta: ScanDelta) -> u64 {
     if let Some(roots) = delta.adopted_roots {
         state.root_commits = roots;
     }
-    state.seen_shas.extend(delta.new_shas);
+    state
+        .awarded
+        .extend(delta.new_awarded.into_iter().map(|a| (a.sha, a.xp)));
     state.seen_patch_ids.extend(delta.new_patch_ids);
     state.record(delta.events)
 }
@@ -487,7 +510,13 @@ mod tests {
 
         let scored = score_fresh(vec![merge], &[]);
 
-        assert_eq!(scored.new_shas, vec![A]);
+        assert_eq!(
+            scored.new_awarded,
+            vec![Awarded {
+                sha: A.to_string(),
+                xp: 0
+            }]
+        );
         assert!(scored.events.is_empty());
         assert!(scored.new_patch_ids.is_empty());
     }
@@ -500,7 +529,13 @@ mod tests {
         let scored = score_fresh(vec![theirs], &[(A, "pid-a")]);
 
         assert!(scored.events.is_empty());
-        assert_eq!(scored.new_shas, vec![A]);
+        assert_eq!(
+            scored.new_awarded,
+            vec![Awarded {
+                sha: A.to_string(),
+                xp: 0
+            }]
+        );
         // Recorded, so rewriting their work later is cleanup, not fresh work.
         assert_eq!(scored.new_patch_ids, vec!["pid-a"]);
     }
@@ -535,7 +570,13 @@ mod tests {
         );
 
         assert!(scored.events.is_empty());
-        assert_eq!(scored.new_shas, vec![A]);
+        assert_eq!(
+            scored.new_awarded,
+            vec![Awarded {
+                sha: A.to_string(),
+                xp: 0
+            }]
+        );
         assert_eq!(scored.new_patch_ids, vec!["pid-a"]);
     }
 

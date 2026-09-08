@@ -1,6 +1,6 @@
 //! One state file per object store, and the identity match that locates one.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,10 +28,12 @@ pub struct RepoState {
     pub git_common_dir: PathBuf,
     pub added_at: i64,
     pub total_xp: u64,
-    /// `BTreeSet` rather than `HashSet`: both serialize as a JSON array, but
-    /// only this one puts it in the same order twice, and two saves of an
-    /// unchanged state are compared byte for byte.
-    pub seen_shas: BTreeSet<String>,
+    /// Every SHA the scan has run through scoring, keyed to the XP it was
+    /// awarded — zero for a merge, another author's commit, or an object gc
+    /// pruned. Kept so a total can be checked against the commits that built it.
+    pub awarded: BTreeMap<String, u64>,
+    /// `BTree` rather than `Hash` for both: each serializes in the same order
+    /// twice, and two saves of an unchanged state are compared byte for byte.
     pub seen_patch_ids: BTreeSet<String>,
     pub worktrees: Vec<Worktree>,
     pub events: Vec<Event>,
@@ -117,7 +119,7 @@ impl RepoState {
             git_common_dir: identity.git_common_dir.clone(),
             added_at: now(),
             total_xp: 0,
-            seen_shas: BTreeSet::new(),
+            awarded: BTreeMap::new(),
             seen_patch_ids: BTreeSet::new(),
             worktrees: vec![Worktree {
                 head_subdir: identity.head_subdir.clone(),
@@ -879,7 +881,7 @@ mod tests {
         let storage = temp.storage();
         let mut repo = state(&[ROOT_A], "/repo/.git");
         repo.total_xp = 1240;
-        repo.seen_shas.insert("a0f0365".into());
+        repo.awarded.insert("a0f0365".into(), 7);
         repo.seen_patch_ids.insert("84b8408".into());
         repo.events.push(Event {
             sha: "a0f0365".into(),
@@ -962,6 +964,36 @@ mod tests {
         );
     }
 
+    /// The tripwire on `awarded` carrying no `#[serde(default)]`. With one, a
+    /// file like this would load holding its total while the record of what
+    /// earned it was empty, and the next scan would find the whole reflog
+    /// unscored and bank every commit again at full value. It claims this
+    /// build's version, so the missing field is the only thing that can reject
+    /// it.
+    #[test]
+    fn a_state_file_with_no_awarded_does_not_load() {
+        let temp = TempRoot::new();
+        let storage = temp.storage();
+        let good = state(&[ROOT_A], "/repo/.git");
+        storage.save(&good).expect("saving");
+
+        let without = storage.repos_dir().join(format!("{}.json", Uuid::new_v4()));
+        fs::write(
+            &without,
+            format!(
+                r#"{{"version":{VERSION},"root_commits":["{ROOT_B}"],
+                     "git_common_dir":"/other/.git","added_at":100,"total_xp":1240,
+                     "seen_patch_ids":[],"worktrees":[],"events":[]}}"#
+            ),
+        )
+        .expect("writing");
+
+        let loaded = storage.load_all();
+        assert_eq!(loaded.repos, vec![good]);
+        assert_eq!(loaded.errors.len(), 1);
+        assert_eq!(loaded.errors[0].path, without);
+    }
+
     #[test]
     fn removing_a_repo_leaves_the_others() {
         let temp = TempRoot::new();
@@ -991,7 +1023,10 @@ mod tests {
 
     #[test]
     fn the_newest_file_on_a_shared_store_is_the_one_that_scores() {
-        let mut repos = vec![state(&[ROOT_A], "/repo/.git"), state(&[ROOT_A], "/repo/.git")];
+        let mut repos = vec![
+            state(&[ROOT_A], "/repo/.git"),
+            state(&[ROOT_A], "/repo/.git"),
+        ];
         let written = written_seconds_apart(&repos);
 
         mark_duplicates(&mut repos, &written);
@@ -1014,7 +1049,10 @@ mod tests {
 
     #[test]
     fn an_unreadable_mtime_leaves_the_whole_store_undecided() {
-        let mut repos = vec![state(&[ROOT_A], "/repo/.git"), state(&[ROOT_A], "/repo/.git")];
+        let mut repos = vec![
+            state(&[ROOT_A], "/repo/.git"),
+            state(&[ROOT_A], "/repo/.git"),
+        ];
         // The second file read, but would not say when it was written.
         let mut written = written_seconds_apart(&repos);
         written.remove(&repos[1].id);
