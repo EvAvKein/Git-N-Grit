@@ -44,7 +44,8 @@ src/
   stale.rs    the 1s probe of stale stores, and the heartbeat that says it is wedged
   scan.rs     the three steps, scoring, the worker thread
   state.rs    RepoState, load/save, identity resolution and matching
-  app.rs      App model, modes, key handling, event loop
+  model.rs    domain state: repos, storage, the watcher, the wedge machinery
+  controller.rs  screen state, key handling, the event loop
   ui.rs       rendering: two panes, prompt, picker, confirm, labels, relative times
 tests/        integration tests over throwaway git repos
 ```
@@ -128,7 +129,7 @@ Parsing is separate from spawning, so the parsers unit-test against fixture text
   this state's path is the one it recorded. `Ours` when a root commit git just resolved is one the
   state file already holds, or when the state holds no roots and the common dir matches. `NotYet`
   when git resolved no roots at all and the state holds some. `Rerooted` when what git resolved
-  matches none of them but the reflog still names a SHA in `seen_shas`, which a store created after
+  matches none of them but the reflog still names a SHA already in `awarded`, which a store created after
   those commits were scored cannot. `Foreign` when it matches none of them and names none of them.
   Only `Ours` un-stales a repo or lets its commits score; the caller passes the flag rather than the
   method reaching for a reflog, so the rules test without a disk the way `match_identity`'s do.
@@ -144,8 +145,9 @@ wedged thread never blocks on one. Both threads that touch the filesystem carry 
 below, and stage 6's worker.
 
 `Ticker` sends into the same `Sender<AppEvent>` every other thread holds, `AppEvent` living in a leaf
-`event.rs` rather than in `app.rs` so this is built and tested before `app.rs` exists. `mpsc` cannot
-wait on two receivers, so a producer with a channel of its own would need a thread to forward it.
+`event.rs` rather than in `model.rs` so this is built and tested before `model.rs` exists. `mpsc`
+cannot wait on two receivers, so a producer with a channel of its own would need a thread to forward
+it.
 
 ```rust
 pub struct Probe { pub id: Uuid, pub git_common_dir: PathBuf }
@@ -161,7 +163,8 @@ impl Ticker {
 The loop snapshots the probe set, parks with no timeout while it is empty, and otherwise stats each
 path in turn — `enter` before the call and `leave` after — then
 sends the ids whose dir now exists and `park_timeout`s the interval. It returns on the stop flag or a
-dropped receiver. `interval` is a parameter so the tests run in milliseconds; `app` passes one second.
+dropped receiver. `interval` is a parameter so the tests run in milliseconds; `model.rs` passes one
+second.
 
 `spawn` drops the `JoinHandle` on purpose and `abandon` consumes the `Ticker`: nothing may ever join
 a thread that could be inside a stat that does not return.
@@ -173,117 +176,156 @@ and a limit: a real hung stat is not something a test can produce, so that path 
 
 ## 6 — `scan.rs` ✅
 
-The only thread that stats a path or spawns `git`. Jobs are `Scan(Box<RepoState>)` and
-`Resolve { seq, path, states }`.
+The only thread that stats a path or spawns `git`. Jobs are `Scan { state: Box<RepoState>,
+verify_ownership: bool }` and `Resolve { seq, path, states }`.
 
 The job carries the whole state, cloned, so the worker shares nothing with the main thread and can
 call `is_stale`, `live_worktrees`, `ownership` and `scan_dir` on it — the methods stage 4 already
 documents as the worker's. At a few thousand SHAs and at most 200 events the clone is microseconds,
 off the render path.
 
-`ScanFindings { events, new_shas, new_patch_ids, adopted_roots, no_email: Option<bool>,
-ownership: Option<Ownership>, stale, watch }`. No `xp_earned`: `RepoState::record` already returns
-what it banked and keeps `total_xp` whole across the events cap, and every commit that earns emits an
-event. `stale` and `watch` are the liveness it resolved on the way in: a job goes to every repo, not
-every live one, and a stale store returns at step 0. `watch` is the resolved directory per live
-worktree — its `logs`, or its git dir where no `logs/` exists yet — since deciding that is a `stat`.
+`ScanFindings { events, new_awarded, new_patch_ids, resolved_roots: Option<Vec<String>>,
+no_email: Option<bool>, ownership: Option<Ownership>, stale, watch }`. No `xp_earned`:
+`RepoState::record` already returns what it banked and keeps `total_xp` whole across the events cap,
+and every commit that earns emits an event. `stale` and `watch` are the liveness it resolved on the
+way in: a job goes to every repo, not every live one, and a stale store returns at step 0. `watch` is
+the resolved directory per live worktree — its `logs`, or its git dir where no `logs/` exists yet —
+since deciding that is a `stat`.
 
-`Resolve` answers `AppEvent::Resolved { seq, result }` for the add prompt, `seq` being the prompt's
-generation, so an answer to a prompt that has moved on is dropped. It runs `state::match_identity`
-with the liveness closure bracketed, because any one of the candidate stores can be the one that
-hangs.
+`Resolve` answers `AppEvent::Resolved { seq, result: Result<Resolved> }` for the add prompt, `seq`
+being the prompt's generation, so an answer to a prompt that has moved on is dropped. `Resolved {
+source_dir, identity, matched }` canonicalises the typed path before git runs, since the stored
+`worktrees` entry has to name the same directory the identity was read from. It runs
+`state::match_identity` with the liveness closure bracketed, because any one of the candidate stores
+can be the one that hangs.
 
 It holds a `probe::InFlight` and is abandoned and replaced as the ticker is, taking its queue with
-it, so the app re-posts every job it has no findings for. `Worker::spawn(tx) -> (Worker, Sender<Job>)`
-mirrors `Ticker`, the handle carrying `wedged` and `abandon`; dropping the job sender alongside it is
-what unblocks a worker waiting on an empty queue.
+it, so the app re-posts every job it has no findings for. `Worker::spawn(tx, incarnation) ->
+(Worker, Sender<Job>)` mirrors `Ticker`, the handle carrying `wedged` and `abandon`; dropping the job
+sender alongside it is what unblocks a worker waiting on an empty queue. `incarnation` is stamped on
+every scan's findings: one already sent by a worker abandoned since arrives after the app has
+re-posted its job, and would otherwise bank the same commits twice.
 
-`no_email` and `ownership` are `Option` because step 2 returns before either question is asked.
-`None` means the scan didn't determine it and the previous answer stands — without that, the `!`
-would clear on the first scan that found nothing new, which is nearly every scan. `ownership` being
-`None` is also how a test tells that a scan reached git not at all.
+`no_email` and `ownership` are `Option`, `None` meaning the scan didn't determine it and the previous
+answer stands — without that, the `!` would clear on the first scan that found nothing new, which is
+nearly every scan. `ownership` turns `Some` as soon as step 2 resolves an identity; `no_email` stays
+`None` until step 3 reaches git a second time, which a verifying scan with nothing left to score
+never does. `ownership` being `None` is also how a test tells that a scan reached git not at all.
 
 0. `is_stale`, then `live_worktrees`. Stale ⇒ return `stale: true` and stop.
 1. Pool `logs/HEAD` from every live worktree git dir through `reflog::extract_shas`.
-2. Subtract `seen_shas`; what is left is `to_score`. Empty ⇒ return empty findings with
-   `no_email: None`, without reaching git at all. Otherwise `resolve_identity` and `state.ownership`:
-   anything but `Ours` returns findings that score nothing and say which.
-3. `user_email` against `state.scan_dir()`.
+2. Subtract keys already in `awarded`; what is left is `to_score`. Empty and not
+   `verify_ownership` ⇒ return empty findings with `no_email: None`, without reaching git at all.
+   Otherwise `resolve_identity` and `state.ownership`: anything but `Ours` returns findings that
+   score nothing and say which. `Ours` carries the roots it resolved in `resolved_roots`, whichever
+   way `to_score` came out — a repo registered before its first commit has none stored, and this may
+   be the scan that finds them.
+3. `to_score` empty (only possible under `verify_ownership`) ⇒ stop here, with nothing left to score.
+   Otherwise `user_email` against `state.scan_dir()`.
 4. `numstat`, then `patch_ids`, run in that same directory.
-5. Sort by `(ct, first_seen_index)` and walk. Two or more parents: record the SHA, with no patch-id
-   and no event. Author email not matching case-insensitively: record the SHA and patch-id, emit no
-   event. Otherwise `xp = 2` where
-   the patch-id is already in the seen set — including one inserted earlier in this same walk — else
-   `added + 3 * deleted`. Both sets take their inserts as the walk goes, which is what lets a rewrite
-   meet its original within a single scan.
+5. Sort by `(ct, first_seen_index)` and walk. Two or more parents: record the SHA at zero XP, with no
+   patch-id and no event. Author email not matching case-insensitively: record the SHA and patch-id
+   at zero XP, emit no event. Otherwise `xp = 2` where the patch-id is already in the seen set —
+   including one inserted earlier in this same walk — else `added + 3 * deleted`. Both sets take
+   their inserts as the walk goes, which is what lets a rewrite meet its original within a single
+   scan.
 6. Entries of `to_score` that `parse_numstat` never returned are the ones `--ignore-missing`
-   dropped. They go into `new_shas` with no patch-id and no event, so the next scan doesn't spend two
-   batched git calls on a SHA whose object is gone.
+   dropped. They go into `new_awarded` at zero XP, with no patch-id and no event, so the next scan
+   doesn't spend two batched git calls on a SHA whose object is gone.
 
-The worker sends `AppEvent::ScanDone(id, Result<ScanFindings>)`. `run_scan(&RepoState)` and
-`run_resolve(path, states)` are the same bodies, public so tests drive them with no thread, channel
-or timing in the way, and `apply(&mut RepoState, ScanFindings) -> u64` banks findings exactly as stage 7
-will — the tests use it rather than a helper that could drift from it.
+The worker sends `AppEvent::ScanDone { incarnation, id, result }`. `run_scan(&RepoState)`,
+`run_verify(&RepoState)` and `run_resolve(path, states)` are the same bodies, public so tests drive
+them with no thread, channel or timing in the way, and `apply(&mut RepoState, ScanFindings) -> u64`
+banks findings exactly as `model.rs` does — the tests use it rather than a helper that could drift
+from it. `apply` writes `resolved_roots` over the stored roots only where they are non-empty, so a
+momentary absence of refs cannot empty the set.
 
-## 7 — `app.rs`
+## 7 — `model.rs` ✅
 
-`AppEvent` is stage 6's, in `event.rs`. What this stage adds:
+The domain state: every repo, storage, and the threads that keep them live. Nothing here knows what
+is on screen.
 
 ```rust
-enum Mode { List, AddPrompt { input, error, checking: bool }, Picker { identity, candidates, sel }, ConfirmRemove { target, sel } }
-enum Row { Add, Repo(Uuid), BadFile(PathBuf) }   // also the remove target
+enum InactiveReason { NotResponding, Shadowed, Undecided, Moved, Foreign, Rerooted, NoEmail, Other(String) }
+enum AddOutcome { Registered(Uuid), Pick { resolved: Resolved, candidates: Vec<Uuid>, offer_new: bool }, Failed(String) }
+struct Scanner { worker, incarnation: u64, jobs: Sender<Job>, scans: HashMap<Uuid, ScanOutdated>, unresolved_paths: usize }
 ```
 
-The forwarder closure sends raw paths and holds no state of its own; the main thread maps them, since
-it owns the watch table. A `HEAD` under a watched `logs` dir marks that repo dirty; a `.takeover`
-under the data dir that still exists on inspection runs the quit path, which is what makes the
-asker's remove-then-create harmless.
+`Model::new` loads the storage, builds one `notify::RecommendedWatcher` over the data directory
+non-recursively (which is what catches `.takeover`), spawns the worker and the ticker, and queues a
+scan for every repo. `on_fs(paths) -> bool` maps raw paths to repo ids and answers whether a
+`.takeover` file appeared — a `HEAD` or a `logs` written under a watched directory queues that
+directory's owners; `HEAD.lock` churn passes neither filter.
 
-Dirty repos drain into a set and queue once each. A repo with a job in flight is re-queued when its
-findings land, and renders its previous total meanwhile. The app keeps the ids it is waiting on, since
-an abandoned worker takes its queue with it and they have to be posted again.
+Registration has to be re-runnable, since a repo that comes back is watched again mid-session:
+`set_watches` re-registers every directory a repo's findings named and drops any it no longer needs.
+`watch()` on a path already watched updates rather than duplicating — `inotify_add_watch` is keyed by
+path, so it should — and `unwatch()` on a path already gone answers with an error to ignore.
 
-Enter in the prompt posts a `Resolve` and sets `checking`; the prompt keeps taking keys and esc
-leaves it. Each prompt has a `seq`, bumped on esc and on submit, and a `Resolved` carrying any other
-`seq` is discarded — a wedged path never answers at all, and its worker is replaced.
+The watcher and the ticker are opposites — one covers what exists, the other what doesn't — and a
+repo is handed from one to the other as it crosses between them. Stale repos are not watched; the
+ticker's `set_probes` carries them instead, fed on every crossing, which is what parks the thread
+when the last one returns and wakes it on the next live → stale transition.
 
-Applying findings adds the XP, extends both seen sets, appends events and truncates to the newest 200
-from the front, adopts `root_commits` where they were empty, clears the row's stored scan error, sets
-`no_email` where the findings determined it, and writes that one state file. Findings that arrive as
-`Err` instead store the error string against that repo and write nothing.
+`Scanner` is this module's end of the worker: the handle, the queue, and what has been posted with no
+answer back. `scans` holds one entry per repo with a job out, `ScanOutdated::True` where something
+asked for another while that one was out, so the repo is queued again once the findings land rather
+than racing the job that would have. `unresolved_paths` counts outstanding `Resolve`s, which have no
+repo to key them by. `may_wedge()` is `scanner.idle() && no repo stale` — true only where nothing is
+in a call that could wedge, which is what lets `Controller` block on the channel rather than poll it.
+`check_wedged()` abandons and replaces whichever thread is wedged past `WEDGE_LIMIT`, re-posting the
+work it lost, and returns the paths that matched no tracked repo — a typed path belongs to none, so
+the caller is left to report it wherever such a path is shown.
 
-The `!` marker is computed per row from three in-memory conditions — the common dir missing, the last
-determined `no_email`, and a stored scan error — none of which live in the state file. `r` queues a
-job for every live repo, the same set startup does; an accepted add queues one for that repo alone.
+`mark(id) -> Option<InactiveReason>` is why a repo earns nothing right now, checked in the order the
+answers displace each other: a wedged filesystem outranks everything, since it is the only one that
+can be current; then `Duplicate`, then `stale`, then `ownership`, then a stored `error`, then
+`no_email`. A shadowed repo is never scanned, so nothing a scan determined is current for it either.
 
-Startup, an add and `r` queue a job for every row, stale ones included, and the findings' `stale` and
-`watch` are the liveness answer. Each transition carries its own work. Live → stale: unwatch, and set
-the marker. Stale → live: the worker resolved the identity on its way in, and the row un-stales only
-where that is `Ownership::Ours` — then `Storage::adopt`, register the watches and score. Any other
-answer leaves the row stale, since the path now holds a repo that isn't this one.
+`resolve_add(Result<Resolved>) -> AddOutcome` is the one place `Model` hands back real data rather
+than recording an outcome on its own state: what it learns — one match, several, or none — decides
+which screen the controller shows next. `Match::Reuse` and `Match::New` register on the spot and come
+back `Registered`; `Match::Selection` comes back `Pick`, `offer_new` false only where the resolved
+store is already named by a registered repo, so a second one could not double-count it.
 
-`AppEvent::Returned` queues those rows the same way, and the findings' `Ownership` decides: `Ours`
-un-stales, `NotYet` leaves the probe to ask again, `Foreign` drops it from the set. The app owns the stale set and
-hands it to the ticker with `set_probes` whenever it changes — which is what parks the thread when
-the last stale repo returns, and wakes it on a live → stale transition.
+Everything else records its outcome on the repo itself rather than returning it: a state file that
+will not write or delete becomes an `error`, read later through `mark`. `bank` applies findings,
+crossing a repo between the watcher and the ticker only on what this scan itself resolved — a stale
+result never takes back a live repo's ownership answer, since it never asked.
 
-The wait is `rx.recv()` where nothing is outstanding and the stale set is empty, and
-`rx.recv_timeout(WEDGE_LIMIT)` otherwise — a thread can only wedge while it is inside a call, and
-those are the only times one is. It checks `ticker.wedged(WEDGE_LIMIT)` and the worker's on each
-event and on every expiry. A path named by either is dropped from the work that named it, its row marked *not
-responding*, and that thread replaced — `abandon` the old one, `spawn` a new one, and re-post: the
-ticker's remaining probes, or every job with no findings yet. Nothing else moves the `!` or the watch
-table.
+## 8 — `controller.rs` ✅
+
+The screen's own state and the keys, holding a `Model` it drives. Nothing here touches a repo's
+filesystem, a scan, a watch or a thread directly.
+
+```rust
+enum Row { Add, Repo(Uuid), BadFile(PathBuf) }   // also the remove target
+enum RepoSelection { Tracked(Uuid), New }
+enum UiState { List, AddPrompt { input, error, checking: bool }, Picker { resolved, lines: Vec<RepoSelection>, selected_line }, ConfirmRemove { target, confirmed: bool } }
+```
+
+`run(rx, draw)` waits, handles, and calls `draw`, which takes `&mut Controller` so the renderer
+reports its page size back through `set_page` for `PgUp`/`PgDn` to move by. The wait is `rx.recv()`
+where `model.may_wedge()` says nothing currently can, and `rx.recv_timeout(WEDGE_LIMIT)` otherwise;
+every loop iteration then calls `model.check_wedged()`, reporting any path it returns to the add
+prompt if one is open.
+
+Enter in the prompt posts a `Resolve` through the model and sets `checking`; the prompt keeps taking
+keys and esc leaves it, bumping `seq` so an answer that arrives after is discarded. `on_resolved`
+matches the model's `AddOutcome`: `Registered` selects that row and queues its scan (`finish_add`);
+`Pick` builds `UiState::Picker`'s lines from the candidates, appending `RepoSelection::New` only where
+`offer_new` said to; `Failed` writes the message into the open prompt.
+
+`d` on a repo or bad-file row opens the confirm with Cancel selected — except the row naming the
+`repos` directory itself, which offers no removal, there being no total to lose. Remove dispatches
+to `model.remove_repo` or `model.remove_bad_file`, each of which records its own failure on that row
+rather than reaching back into the loop, and re-clamps the selection against the row count after.
 
 Keys: `↑↓/jk`, `enter` (acts only on `+ Add repo…`), `a`, `d`, `r`, `q`, and `PgUp`/`PgDn`/`home` for
 the right pane. In the prompt every key is text, and only enter and esc leave it. Esc from the list
 does nothing. No mouse capture is enabled and no mouse events are read.
 
-`d` on a repo row opens the confirm with Cancel selected; Remove deletes the state file, drops the
-repo's watches, and removes the row. On a `BadFile` row the confirm names the file instead of a
-total, and Remove deletes it — there are no watches to drop. On `+ Add repo…` it does nothing.
-
-## 8 — `ui.rs`
+## 9 — `ui.rs`
 
 `Layout::horizontal` at 45/55, the left constrained to 28…40 columns. Left pane: `+ Add repo…`, then
 one row per repo with its total, `>` on the selection, scrolled to keep the selection visible, rows
@@ -300,7 +342,7 @@ renders the spec's one-line reason in place of the list. An empty list renders n
 Relative times run off the startup offset, with civil dates from a days-to-y/m/d conversion in the
 module.
 
-## 9 — `lock.rs` and `main.rs`
+## 10 — `lock.rs` and `main.rs`
 
 `main` walks `std::env::args()` for `--storage=<path>` and `--storage <path>`, falling back to
 `dirs::data_dir()?.join("git-n-grit")`, and rejects anything else with a usage line and a non-zero
@@ -321,21 +363,6 @@ unlinks it and exits non-zero.
 
 The quit path — `q` and handover alike — blanks `.take`, drops the handle, calls
 `ratatui::restore()`, and exits 0. An in-flight scan's findings are dropped unwritten.
-
-## 10 — Watcher and the stale ticker
-
-One `notify::RecommendedWatcher` over the `logs` directory of every live worktree,
-`RecursiveMode::NonRecursive`, plus the data directory for `.takeover`. Where a repo has no commits
-and no `logs/`, watch the git dir instead. Stale repos are not watched.
-
-Registration has to be re-runnable, since a repo that comes back is watched again mid-session. Verify
-both halves when the watcher goes in: that `watch()` on a path already watched updates rather than
-duplicates — `inotify_add_watch` is keyed by path, so it should — and what `unwatch()` returns for a
-path that is already gone, which is an error to ignore rather than propagate.
-
-The ticker is wired here too: one `Ticker::spawn(Duration::from_secs(1), tx)` beside the watcher, fed
-by `set_probes` from the app's stale set. The two are opposites — the watcher covers what exists, the
-ticker what doesn't — and a repo crossing between them is handed from one to the other.
 
 ## 11 — Tests
 
