@@ -160,15 +160,15 @@ mod tests {
     #[test]
     fn a_store_that_comes_back_is_reported() {
         let temp = TempRoot::new();
-        let (tx, rx) = mpsc::channel();
-        let ticker = Ticker::spawn(QUICK, tx);
+        let (outbox, inbox) = mpsc::channel();
+        let ticker = Ticker::spawn(QUICK, outbox);
         let probe = temp.probe("gone.git");
 
         ticker.set_probes(vec![probe.clone()]);
         fs::create_dir(&probe.git_common_dir).expect("creating the store");
 
         assert_eq!(
-            returned(rx.recv_timeout(SLACK).expect("a report")),
+            returned(inbox.recv_timeout(SLACK).expect("a report")),
             vec![probe.id]
         );
     }
@@ -176,35 +176,35 @@ mod tests {
     #[test]
     fn a_store_still_missing_is_not_reported() {
         let temp = TempRoot::new();
-        let (tx, rx) = mpsc::channel();
-        let ticker = Ticker::spawn(QUICK, tx);
+        let (outbox, inbox) = mpsc::channel();
+        let ticker = Ticker::spawn(QUICK, outbox);
 
         ticker.set_probes(vec![temp.probe("gone.git")]);
 
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(inbox.recv_timeout(Duration::from_millis(100)).is_err());
     }
 
     #[test]
     fn an_empty_set_parks_rather_than_spinning() {
-        let (tx, rx) = mpsc::channel::<AppEvent>();
-        let _ticker = Ticker::spawn(QUICK, tx);
+        let (outbox, inbox) = mpsc::channel::<AppEvent>();
+        let _ticker = Ticker::spawn(QUICK, outbox);
 
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(inbox.recv_timeout(Duration::from_millis(100)).is_err());
     }
 
     #[test]
     fn setting_probes_wakes_a_parked_ticker() {
         let temp = TempRoot::new();
-        let (tx, rx) = mpsc::channel();
+        let (outbox, inbox) = mpsc::channel();
         // An interval long enough that only the unpark can deliver this.
-        let ticker = Ticker::spawn(Duration::from_secs(600), tx);
+        let ticker = Ticker::spawn(Duration::from_secs(600), outbox);
         let probe = temp.probe("here.git");
         fs::create_dir(&probe.git_common_dir).expect("creating the store");
 
         ticker.set_probes(vec![probe.clone()]);
 
         assert_eq!(
-            returned(rx.recv_timeout(SLACK).expect("a report")),
+            returned(inbox.recv_timeout(SLACK).expect("a report")),
             vec![probe.id]
         );
     }
@@ -212,15 +212,15 @@ mod tests {
     #[test]
     fn abandoning_ends_the_thread() {
         let temp = TempRoot::new();
-        let (tx, rx) = mpsc::channel::<AppEvent>();
-        let ticker = Ticker::spawn(Duration::from_secs(600), tx);
+        let (outbox, inbox) = mpsc::channel::<AppEvent>();
+        let ticker = Ticker::spawn(Duration::from_secs(600), outbox);
         ticker.set_probes(vec![temp.probe("gone.git")]);
 
         ticker.abandon();
 
         // The thread owns the sender, so a disconnect is it having returned.
         assert!(matches!(
-            rx.recv_timeout(SLACK),
+            inbox.recv_timeout(SLACK),
             Err(mpsc::RecvTimeoutError::Disconnected)
         ));
     }
@@ -228,8 +228,8 @@ mod tests {
     /// The rule itself is [`crate::probe`]'s; this is the wiring to it.
     #[test]
     fn a_ticker_that_has_stat_ed_nothing_is_never_wedged() {
-        let (tx, _rx) = mpsc::channel::<AppEvent>();
-        let ticker = Ticker::spawn(Duration::from_secs(600), tx);
+        let (outbox, _inbox) = mpsc::channel::<AppEvent>();
+        let ticker = Ticker::spawn(Duration::from_secs(600), outbox);
 
         assert_eq!(ticker.wedged(Duration::ZERO), None);
     }

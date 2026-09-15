@@ -110,12 +110,12 @@ impl Worker {
     ///
     /// `incarnation` is stamped on every scan's findings, so those from a
     /// worker abandoned since are told from the job that replaced it.
-    pub fn spawn(tx: Sender<AppEvent>, incarnation: u64) -> (Worker, Sender<Job>) {
+    pub fn spawn(outbox: Sender<AppEvent>, incarnation: u64) -> (Worker, Sender<Job>) {
         let (jobs_tx, jobs_rx) = channel();
         let shared = Arc::new(Shared::default());
         {
             let shared = Arc::clone(&shared);
-            thread::spawn(move || run(&shared, incarnation, &jobs_rx, &tx));
+            thread::spawn(move || run(&shared, incarnation, &jobs_rx, &outbox));
         }
         (Worker { shared }, jobs_tx)
     }
@@ -136,7 +136,7 @@ impl Worker {
     }
 }
 
-fn run(shared: &Shared, incarnation: u64, jobs: &Receiver<Job>, tx: &Sender<AppEvent>) {
+fn run(shared: &Shared, incarnation: u64, jobs: &Receiver<Job>, outbox: &Sender<AppEvent>) {
     while let Ok(job) = jobs.recv() {
         if shared.stop.load(Ordering::Relaxed) {
             return;
@@ -158,7 +158,7 @@ fn run(shared: &Shared, incarnation: u64, jobs: &Receiver<Job>, tx: &Sender<AppE
         };
 
         // A dropped receiver is the app going away.
-        if tx.send(event).is_err() {
+        if outbox.send(event).is_err() {
             return;
         }
     }
