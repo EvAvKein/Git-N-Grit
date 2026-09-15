@@ -86,7 +86,7 @@ Parsing is separate from spawning, so the parsers unit-test against fixture text
 
 ## 4 — `state.rs` ✅
 
-`RepoState` mirrors the spec's JSON field for field, at `version: 1`.
+`RepoState` mirrors the spec's JSON field for field, at `file_format_version: 1`.
 
 `Storage { root: PathBuf }` owns the directory and every path under it — `root/repos/`,
 `root/.take`, `root/.takeover`. `main` builds it from `--storage` where given and
@@ -95,7 +95,7 @@ Parsing is separate from spawning, so the parsers unit-test against fixture text
 
 - `Storage::load_all()` — enumerate `repos/*.json`, sort by `added_at` then `git_common_dir`,
   returning `Loaded { repos, errors: Vec<LoadError> }`. A file that fails to parse, is named
-  something other than a UUID, or carries a `version` above this build's costs only its own repo.
+  something other than a UUID, or carries a `file_format_version` above this build's costs only its own repo.
   `LoadError` keeps the `path` rather than a formatted message: stage 8's row labels itself from the
   file name and stage 7's `d` deletes that file. A `path` equal to `repos_dir()` is the directory
   itself — the read failing, or an entry under it that would not — and both stages compare against

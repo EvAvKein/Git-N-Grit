@@ -255,7 +255,7 @@ file is found by its [identity](#repo-identity).
 
 ```json
 {
-  "version": 1,
+  "file_format_version": 1,
   "root_commits": ["9e21c0f…"],
   "git_common_dir": "/home/eve/repo/Git-N-Grit/.git",
   "added_at": 1756100000,
@@ -295,7 +295,7 @@ everything ever registered — and a scan fires on every commit. A failed write 
 and no other's, which matters because a lost `seen_patch_ids` makes every commit still in its reflogs
 re-mintable at full value.
 
-`version` is per state file, so repos migrate independently. A file numbered above this build's own
+`file_format_version` is per state file, so repos migrate independently. A file numbered above this build's own
 does not load: serde drops the fields it doesn't know, and the next save would write that truncation
 back over the newer writer's work.
 

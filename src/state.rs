@@ -21,7 +21,7 @@ const VERSION: u32 = 1;
 /// it twice. A repo and every linked worktree of it share one of these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoState {
-    pub version: u32,
+    pub file_format_version: u32,
     /// Sorted, as `RepoIdentity` delivers them. Empty until a commitless repo
     /// makes its first commit.
     pub root_commits: Vec<String>,
@@ -127,7 +127,7 @@ impl RepoState {
     /// A store registered for the first time, from `source_dir`.
     pub fn new(identity: &RepoIdentity, source_dir: &Path) -> Self {
         RepoState {
-            version: VERSION,
+            file_format_version: VERSION,
             root_commits: identity.root_commits.clone(),
             git_common_dir: identity.git_common_dir.clone(),
             added_at: now(),
@@ -530,10 +530,10 @@ fn load_one(path: &Path) -> Result<RepoState> {
     let mut state: RepoState = serde_json::from_str(&text)?;
     // A newer writer's fields are dropped by serde, and saving would write the
     // truncation back. Skip the repo instead.
-    if state.version > VERSION {
+    if state.file_format_version > VERSION {
         bail!(
             "version {} is newer than this build's {VERSION}",
-            state.version
+            state.file_format_version
         );
     }
     // Skipped by serde, so it comes from the filename or from nowhere.
@@ -970,7 +970,7 @@ mod tests {
         storage.save(&good).expect("saving");
 
         let mut newer = state(&[ROOT_B], "/newer/.git");
-        newer.version = VERSION + 1;
+        newer.file_format_version = VERSION + 1;
         storage.save(&newer).expect("saving");
 
         let loaded = storage.load_all();
@@ -999,7 +999,7 @@ mod tests {
         fs::write(
             &without,
             format!(
-                r#"{{"version":{VERSION},"root_commits":["{ROOT_B}"],
+                r#"{{"file_format_version":{VERSION},"root_commits":["{ROOT_B}"],
                      "git_common_dir":"/other/.git","added_at":100,"total_xp":1240,
                      "seen_patch_ids":[],"worktrees":[],"events":[]}}"#
             ),
