@@ -276,7 +276,7 @@ pub enum Match {
     /// Exactly one store is this one. Adopt into it.
     Reuse(Uuid),
     /// Ambiguous: the user picks one, or "new repo".
-    Pick(Vec<Uuid>),
+    Selection(Vec<Uuid>),
     /// Nothing on disk relates to it.
     New,
 }
@@ -328,10 +328,10 @@ pub fn match_identity(
             if occupants.is_empty() {
                 Match::New
             } else {
-                Match::Pick(occupants)
+                Match::Selection(occupants)
             }
         }
-        _ => Match::Pick(candidates),
+        _ => Match::Selection(candidates),
     }
 }
 
@@ -663,7 +663,7 @@ mod tests {
                 &resolved,
                 live_except(&["/gone/one/.git", "/gone/two/.git"])
             ),
-            Match::Pick(ids)
+            Match::Selection(ids)
         );
     }
 
@@ -676,7 +676,7 @@ mod tests {
 
         assert_eq!(
             match_identity(&[existing], &resolved, live_except(&[])),
-            Match::Pick(vec![id])
+            Match::Selection(vec![id])
         );
     }
 
@@ -692,7 +692,7 @@ mod tests {
 
         assert_eq!(
             match_identity(&[first, second], &resolved, live_except(&[])),
-            Match::Pick(ids)
+            Match::Selection(ids)
         );
     }
 
