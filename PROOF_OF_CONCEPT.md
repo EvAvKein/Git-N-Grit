@@ -211,20 +211,20 @@ re-resolve which repos and worktrees are live.
 
 **Where it runs.** On one worker thread — not on the main thread, and not one thread per scan. The
 main thread posts a job per dirty repo; the worker runs the three steps and the scoring and sends
-back a delta — new events, xp earned, new SHAs, new patch-ids — as one more `AppEvent`. The main
+back its findings — new events, xp earned, new SHAs, new patch-ids — as one more `AppEvent`. The main
 thread applies it and writes the state file, so state keeps a single owner and the write stays on
 the path `q` and handover already take.
 
 Every `stat` and every `git` the app runs happens there as well, and none on the main thread. A path
 that has stopped answering keeps the thread that touched it, and the main thread is the one that has
 to go on drawing and answering `q`. So liveness is the worker's answer too: the main thread queues a
-job for every repo rather than every live one, having no way to know which is which, and the delta
-reports what the worker found — whether the store is still there, and which worktrees to watch. A
-stale one is answered by the probe alone, with no git call behind it. Until the first deltas land
+job for every repo rather than every live one, having no way to know which is which, and the findings
+report what the worker found — whether the store is still there, and which worktrees to watch. A
+stale one is answered by the probe alone, with no git call behind it. Until the first scans land
 nothing is known to be live, and rows render without `!`.
 
 A repo with a job in flight is not queued again. Events arriving meanwhile mark it dirty, and it is
-re-queued when its delta lands. Its row goes on rendering the total it already had: most scans find
+re-queued when its findings land. Its row goes on rendering the total it already had: most scans find
 nothing, and those have to look like nothing happened.
 
 **Whole file, every time.** No stored offset, no tail read. The reflog is bounded by its own
@@ -341,7 +341,7 @@ earning XP with nothing on screen to say why.
 
 Liveness is resolved again at startup, on an add and on `r`, both ways: a store whose common dir is
 back is watched and scanned once more, and one that has just gone loses its watches and takes the
-marker. The [worker](#scanning) answers it, so each of those is a job queued and a delta applied
+marker. The [worker](#scanning) answers it, so each of those is a job queued and findings applied
 rather than anything the main thread looks up for itself.
 
 A stale store is also probed once a second by a thread of its own, which stats each one's stored
@@ -388,7 +388,7 @@ filesystem is not responding`, which is a different thing from having moved or b
 
 Both threads that touch the filesystem carry this, the ticker and the [worker](#scanning), and are
 abandoned the same way. A worker takes its queue down with it, so the main thread holds the jobs it
-has no delta for and posts them again to the replacement.
+has no findings for and posts them again to the replacement.
 
 Deleting a linked worktree's directory by hand leaves its git dir and reflog behind under the common
 dir — `git worktree list` calls this *prunable*. That entry stays live and harmless: the working tree
@@ -655,7 +655,7 @@ The holder watches the data directory non-recursively for the filename `.takeove
 the reflog watch. The event arrives as one more `AppEvent` and runs the path already written for `q`:
 finish the state write in flight, blank and release the lock, restore the terminal, exit 0. It has to
 work from any UI state, the add-repo prompt included. Handing over mid-scan loses nothing: quitting
-does not wait for the worker, its delta is dropped unwritten, and `seen_shas` makes the next
+does not wait for the worker, its findings are dropped unwritten, and `seen_shas` makes the next
 instance's scan redo it to the same result.
 
 **It stops at asking.** A holder too wedged to drain its channel keeps the lock, and the asker exits.
@@ -818,7 +818,7 @@ The expire, gc and identity cases matter most: those failures report no error, a
 after the commits they lost.
 
 One thing is checked by hand rather than in a test: that the first scan of a repo with a long reflog
-leaves the keys responsive, and that the row holds its previous total until the delta lands.
+leaves the keys responsive, and that the row holds its previous total until the findings land.
 
 ## Beyond the PoC — storage
 

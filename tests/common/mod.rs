@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use gng::git::resolve_identity;
-use gng::scan::{ScanDelta, apply, run_scan, run_verify};
+use gng::scan::{ScanFindings, apply, run_scan, run_verify};
 use gng::state::RepoState;
 use uuid::Uuid;
 
@@ -164,22 +164,22 @@ impl Repo {
 
 /// Scan and bank it, as the app will. Returns the XP earned.
 pub fn scan(state: &mut RepoState) -> u64 {
-    let delta = run_scan(state).expect("a scan");
-    apply(state, delta)
+    let findings = run_scan(state).expect("a scan");
+    apply(state, findings)
 }
 
-/// The delta alone, for the cases that assert on what a scan did *not* do.
-pub fn delta(state: &RepoState) -> ScanDelta {
+/// The findings alone, for the cases that assert on what a scan did *not* do.
+pub fn findings(state: &RepoState) -> ScanFindings {
     run_scan(state).expect("a scan")
 }
 
-/// The delta of a scan asked to resolve the identity whatever it finds.
-pub fn verify(state: &RepoState) -> ScanDelta {
+/// The findings of a scan asked to resolve the identity whatever it finds.
+pub fn verify(state: &RepoState) -> ScanFindings {
     run_verify(state).expect("a verifying scan")
 }
 
 /// A scan that ended at step 2 never resolved an identity, which is the mark
 /// of one that reached git not at all.
-pub fn reached_git(delta: &ScanDelta) -> bool {
-    delta.ownership.is_some()
+pub fn reached_git(findings: &ScanFindings) -> bool {
+    findings.ownership.is_some()
 }

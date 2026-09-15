@@ -11,7 +11,7 @@ use anyhow::Result;
 use ratatui::crossterm::event::Event as CtEvent;
 use uuid::Uuid;
 
-use crate::scan::{Resolved, ScanDelta};
+use crate::scan::{Resolved, ScanFindings};
 
 /// Everything that can reach the main loop.
 #[derive(Debug)]
@@ -22,12 +22,12 @@ pub enum AppEvent {
     /// that maps them back to repos is the main thread's.
     Fs(Vec<PathBuf>),
     /// A scan finished. `Err` leaves the total alone and takes the row's `!`.
-    /// `incarnation` is the worker's, so a delta from one that has been
-    /// abandoned is dropped rather than banked beside the job that replaced it.
+    /// `incarnation` is the worker's, so findings from one that has been
+    /// abandoned are dropped rather than banked beside the job that replaced it.
     ScanDone {
         incarnation: u64,
         id: Uuid,
-        result: Result<ScanDelta>,
+        result: Result<ScanFindings>,
     },
     /// Stale stores whose common dir has reappeared. Whether one is *ours* is
     /// the scan that follows to answer.

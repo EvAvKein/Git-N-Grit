@@ -59,7 +59,7 @@ pub struct Awarded {
 /// What one scan found. Applying it is [`apply`]; the markers it feeds — the
 /// `!`, the watch table — are the main thread's.
 #[derive(Debug, Default)]
-pub struct ScanDelta {
+pub struct ScanFindings {
     /// In `ct` order, as scored, so appending keeps storage chronological.
     pub events: Vec<Event>,
     /// Each SHA scored this pass, zero-XP entries included.
@@ -108,8 +108,8 @@ impl Worker {
     /// `JoinHandle` is dropped deliberately: a `git` call on a dead mount must
     /// not be something the app can wait on.
     ///
-    /// `incarnation` is stamped on every delta this worker sends, so a delta
-    /// from one abandoned since is told from the job that replaced it.
+    /// `incarnation` is stamped on every scan's findings, so those from a
+    /// worker abandoned since are told from the job that replaced it.
     pub fn spawn(tx: Sender<AppEvent>, incarnation: u64) -> (Worker, Sender<Job>) {
         let (jobs_tx, jobs_rx) = channel();
         let shared = Arc::new(Shared::default());
@@ -166,13 +166,13 @@ fn run(shared: &Shared, incarnation: u64, jobs: &Receiver<Job>, tx: &Sender<AppE
 
 /// One scan of one store. Public so tests drive it with no thread, channel or
 /// timing in the way.
-pub fn run_scan(state: &RepoState) -> Result<ScanDelta> {
+pub fn run_scan(state: &RepoState) -> Result<ScanFindings> {
     scan(state, false, &InFlight::default())
 }
 
 /// A scan that resolves the identity whether or not anything is left to score,
 /// which is what a row the app does not hold as ours is asked for.
-pub fn run_verify(state: &RepoState) -> Result<ScanDelta> {
+pub fn run_verify(state: &RepoState) -> Result<ScanFindings> {
     scan(state, true, &InFlight::default())
 }
 
@@ -181,18 +181,18 @@ pub fn run_resolve(path: &Path, states: &[RepoState]) -> Result<Resolved> {
     resolve(path, states, &InFlight::default())
 }
 
-fn scan(state: &RepoState, verify_ownership: bool, in_flight: &InFlight) -> Result<ScanDelta> {
-    let mut delta = ScanDelta::default();
+fn scan(state: &RepoState, verify_ownership: bool, in_flight: &InFlight) -> Result<ScanFindings> {
+    let mut findings = ScanFindings::default();
 
     // One bracket for every path read here — all under the store's dir, and
     // the app abandons wedged work per store.
     let Some(store) = watching(in_flight, &state.git_common_dir, || {
         (!state.is_stale()).then(|| read_store(state))
     }) else {
-        delta.stale = true;
-        return Ok(delta);
+        findings.stale = true;
+        return Ok(findings);
     };
-    delta.watch = store.watch;
+    findings.watch = store.watch;
 
     // What the reflogs name that has not already been processed. Cost from
     // here scales with what is left to score, not with the reflogs' size.
@@ -203,7 +203,7 @@ fn scan(state: &RepoState, verify_ownership: bool, in_flight: &InFlight) -> Resu
         .cloned()
         .collect();
     if to_score.is_empty() && !verify_ownership {
-        return Ok(delta); // git is not reached at all
+        return Ok(findings); // git is not reached at all
     }
     // Anything subtracted was scored into this state before this store could
     // have been created, so the store is the one we have been reading.
@@ -214,22 +214,22 @@ fn scan(state: &RepoState, verify_ownership: bool, in_flight: &InFlight) -> Resu
     let dir = store.scan_dir;
     let identity = watching(in_flight, &dir, || git::resolve_identity(&dir))?;
     let ownership = state.ownership(&identity, holds_seen_commits);
-    delta.ownership = Some(ownership);
+    findings.ownership = Some(ownership);
     if ownership != Ownership::Ours {
-        return Ok(delta);
+        return Ok(findings);
     }
-    delta.resolved_roots = Some(identity.root_commits);
+    findings.resolved_roots = Some(identity.root_commits);
 
     // Whose it is was all this scan was asked for. The roots above still go
     // back: a repo registered before its first commit has none stored.
     if to_score.is_empty() {
-        return Ok(delta);
+        return Ok(findings);
     }
 
     // Read per scan and never stored, so changing your identity takes effect
     // on the next scan with nothing to migrate.
     let email = watching(in_flight, &dir, || git::user_email(&dir))?;
-    delta.no_email = Some(email.is_none());
+    findings.no_email = Some(email.is_none());
 
     // Two batched calls over the same list.
     let commits = watching(in_flight, &dir, || git::numstat(&dir, &to_score))?;
@@ -242,11 +242,11 @@ fn scan(state: &RepoState, verify_ownership: bool, in_flight: &InFlight) -> Resu
         email.as_deref(),
         &state.seen_patch_ids,
     );
-    delta.events = scored.events;
-    delta.new_patch_ids = scored.new_patch_ids;
-    delta.new_awarded = scored.new_awarded;
+    findings.events = scored.events;
+    findings.new_patch_ids = scored.new_patch_ids;
+    findings.new_awarded = scored.new_awarded;
 
-    Ok(delta)
+    Ok(findings)
 }
 
 fn resolve(path: &Path, states: &[RepoState], in_flight: &InFlight) -> Result<Resolved> {
@@ -425,23 +425,23 @@ fn score(
     scored
 }
 
-/// Bank a delta into the state it came from, and return the XP it earned.
+/// Bank findings into the state they came from, and return the XP they earned.
 ///
 /// Writing the state file is the main thread's, as are the markers that live
 /// only in memory: the `!`, the stored scan error, the watch table.
-pub fn apply(state: &mut RepoState, delta: ScanDelta) -> u64 {
+pub fn apply(state: &mut RepoState, findings: ScanFindings) -> u64 {
     // A commitless repo resolves an empty set; overwriting the stored roots
     // with it would stop the repo matching itself until its first commit.
-    if let Some(roots) = delta.resolved_roots
+    if let Some(roots) = findings.resolved_roots
         && !roots.is_empty()
     {
         state.root_commits = roots;
     }
     state
         .awarded
-        .extend(delta.new_awarded.into_iter().map(|a| (a.sha, a.xp)));
-    state.seen_patch_ids.extend(delta.new_patch_ids);
-    state.record(delta.events)
+        .extend(findings.new_awarded.into_iter().map(|a| (a.sha, a.xp)));
+    state.seen_patch_ids.extend(findings.new_patch_ids);
+    state.record(findings.events)
 }
 
 #[cfg(test)]

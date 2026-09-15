@@ -5,7 +5,7 @@ mod common;
 
 use std::fs;
 
-use common::{Fixture, MINE, THEIRS, delta, reached_git, scan, verify};
+use common::{Fixture, MINE, THEIRS, findings, reached_git, scan, verify};
 use gng::scan::{apply, run_scan};
 use gng::state::Ownership;
 
@@ -51,7 +51,7 @@ fn a_repo_with_no_user_email_scores_nothing_and_says_which() {
     repo.run(&["config", "user.email", ""]);
     let mut state = repo.state();
 
-    let d = delta(&state);
+    let d = findings(&state);
     assert_eq!(d.no_email, Some(true));
     assert!(d.events.is_empty());
 
@@ -70,7 +70,7 @@ fn a_rescan_with_nothing_new_leaves_the_no_email_answer_standing() {
 
     // Re-deriving it from a scan that never asked would blink the `!` off a
     // repo that still cannot earn.
-    let d = delta(&state);
+    let d = findings(&state);
     assert_eq!(d.no_email, None);
     assert!(!reached_git(&d));
 }
@@ -115,7 +115,7 @@ fn a_merge_is_never_listed_and_the_scan_after_it_reaches_git_not_at_all() {
     assert!(state.events.iter().all(|e| e.subject != "Merge side"));
     // Its SHA is recorded, or it comes back on every scan until it expires.
     assert_eq!(state.awarded.get(&merge), Some(&0));
-    assert!(!reached_git(&delta(&state)));
+    assert!(!reached_git(&findings(&state)));
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn a_scan_with_nothing_in_between_awards_nothing_and_reaches_git_not_at_all() {
     let mut state = repo.state();
     scan(&mut state);
 
-    let d = delta(&state);
+    let d = findings(&state);
     assert!(d.events.is_empty());
     assert!(!reached_git(&d));
 }
@@ -342,13 +342,13 @@ fn a_reflog_naming_a_pruned_object_scans_cleanly_and_is_not_asked_twice() {
     ));
     fs::write(repo.reflog(), log).expect("writing the reflog");
 
-    let d = delta(&state);
+    let d = findings(&state);
     assert!(d.events.is_empty());
     assert!(d.new_awarded.iter().any(|a| a.sha == ghost && a.xp == 0));
 
     apply(&mut state, d);
     // Recorded, so the next scan spends no batched call skipping it again.
-    assert!(!reached_git(&delta(&state)));
+    assert!(!reached_git(&findings(&state)));
 }
 
 #[test]
@@ -363,7 +363,7 @@ fn a_history_rewritten_in_place_stops_scoring_and_keeps_its_total() {
     repo.run(&["commit", "--amend", "-m", "first, reworded"]);
     repo.commit_file("b.txt", "three\n", "second");
 
-    let d = delta(&state);
+    let d = findings(&state);
     assert_eq!(d.ownership, Some(Ownership::Rerooted));
     assert!(d.events.is_empty());
 
@@ -386,7 +386,7 @@ fn a_store_replaced_in_place_is_foreign_and_inherits_nothing() {
     repo.run(&["config", "user.email", MINE]);
     repo.commit_file("c.txt", "fresh\n", "fresh start");
 
-    let d = delta(&state);
+    let d = findings(&state);
     assert_eq!(d.ownership, Some(Ownership::Foreign));
     assert!(d.events.is_empty());
 
@@ -425,7 +425,7 @@ fn a_verifying_scan_takes_the_roots_of_a_repo_that_had_none() {
     let first = repo.commit_file("a.txt", "one\n", "first");
     // Scored already, so an ordinary scan returns before asking anything.
     state.awarded.insert(first.clone(), 0);
-    assert!(!reached_git(&delta(&state)));
+    assert!(!reached_git(&findings(&state)));
 
     let d = verify(&state);
 

@@ -181,7 +181,7 @@ call `is_stale`, `live_worktrees`, `ownership` and `scan_dir` on it — the meth
 documents as the worker's. At a few thousand SHAs and at most 200 events the clone is microseconds,
 off the render path.
 
-`ScanDelta { events, new_shas, new_patch_ids, adopted_roots, no_email: Option<bool>,
+`ScanFindings { events, new_shas, new_patch_ids, adopted_roots, no_email: Option<bool>,
 ownership: Option<Ownership>, stale, watch }`. No `xp_earned`: `RepoState::record` already returns
 what it banked and keeps `total_xp` whole across the events cap, and every commit that earns emits an
 event. `stale` and `watch` are the liveness it resolved on the way in: a job goes to every repo, not
@@ -194,7 +194,7 @@ with the liveness closure bracketed, because any one of the candidate stores can
 hangs.
 
 It holds a `probe::InFlight` and is abandoned and replaced as the ticker is, taking its queue with
-it, so the app re-posts every job it has no delta for. `Worker::spawn(tx) -> (Worker, Sender<Job>)`
+it, so the app re-posts every job it has no findings for. `Worker::spawn(tx) -> (Worker, Sender<Job>)`
 mirrors `Ticker`, the handle carrying `wedged` and `abandon`; dropping the job sender alongside it is
 what unblocks a worker waiting on an empty queue.
 
@@ -205,9 +205,9 @@ would clear on the first scan that found nothing new, which is nearly every scan
 
 0. `is_stale`, then `live_worktrees`. Stale ⇒ return `stale: true` and stop.
 1. Pool `logs/HEAD` from every live worktree git dir through `reflog::extract_shas`.
-2. Subtract `seen_shas`; what is left is `to_score`. Empty ⇒ return an empty delta with
+2. Subtract `seen_shas`; what is left is `to_score`. Empty ⇒ return empty findings with
    `no_email: None`, without reaching git at all. Otherwise `resolve_identity` and `state.ownership`:
-   anything but `Ours` returns a delta that scores nothing and says which.
+   anything but `Ours` returns findings that score nothing and say which.
 3. `user_email` against `state.scan_dir()`.
 4. `numstat`, then `patch_ids`, run in that same directory.
 5. Sort by `(ct, first_seen_index)` and walk. Two or more parents: record the SHA, with no patch-id
@@ -220,9 +220,9 @@ would clear on the first scan that found nothing new, which is nearly every scan
    dropped. They go into `new_shas` with no patch-id and no event, so the next scan doesn't spend two
    batched git calls on a SHA whose object is gone.
 
-The worker sends `AppEvent::ScanDone(id, Result<ScanDelta>)`. `run_scan(&RepoState)` and
+The worker sends `AppEvent::ScanDone(id, Result<ScanFindings>)`. `run_scan(&RepoState)` and
 `run_resolve(path, states)` are the same bodies, public so tests drive them with no thread, channel
-or timing in the way, and `apply(&mut RepoState, ScanDelta) -> u64` banks a delta exactly as stage 7
+or timing in the way, and `apply(&mut RepoState, ScanFindings) -> u64` banks findings exactly as stage 7
 will — the tests use it rather than a helper that could drift from it.
 
 ## 7 — `app.rs`
@@ -240,29 +240,29 @@ under the data dir that still exists on inspection runs the quit path, which is 
 asker's remove-then-create harmless.
 
 Dirty repos drain into a set and queue once each. A repo with a job in flight is re-queued when its
-delta lands, and renders its previous total meanwhile. The app keeps the ids it is waiting on, since
+findings land, and renders its previous total meanwhile. The app keeps the ids it is waiting on, since
 an abandoned worker takes its queue with it and they have to be posted again.
 
 Enter in the prompt posts a `Resolve` and sets `checking`; the prompt keeps taking keys and esc
 leaves it. Each prompt has a `seq`, bumped on esc and on submit, and a `Resolved` carrying any other
 `seq` is discarded — a wedged path never answers at all, and its worker is replaced.
 
-Applying a delta adds the XP, extends both seen sets, appends events and truncates to the newest 200
+Applying findings adds the XP, extends both seen sets, appends events and truncates to the newest 200
 from the front, adopts `root_commits` where they were empty, clears the row's stored scan error, sets
-`no_email` where the delta determined it, and writes that one state file. A delta that arrives as
-`Err` instead stores the error string against that repo and writes nothing.
+`no_email` where the findings determined it, and writes that one state file. Findings that arrive as
+`Err` instead store the error string against that repo and write nothing.
 
 The `!` marker is computed per row from three in-memory conditions — the common dir missing, the last
 determined `no_email`, and a stored scan error — none of which live in the state file. `r` queues a
 job for every live repo, the same set startup does; an accepted add queues one for that repo alone.
 
-Startup, an add and `r` queue a job for every row, stale ones included, and the delta's `stale` and
+Startup, an add and `r` queue a job for every row, stale ones included, and the findings' `stale` and
 `watch` are the liveness answer. Each transition carries its own work. Live → stale: unwatch, and set
 the marker. Stale → live: the worker resolved the identity on its way in, and the row un-stales only
 where that is `Ownership::Ours` — then `Storage::adopt`, register the watches and score. Any other
 answer leaves the row stale, since the path now holds a repo that isn't this one.
 
-`AppEvent::Returned` queues those rows the same way, and the delta's `Ownership` decides: `Ours`
+`AppEvent::Returned` queues those rows the same way, and the findings' `Ownership` decides: `Ours`
 un-stales, `NotYet` leaves the probe to ask again, `Foreign` drops it from the set. The app owns the stale set and
 hands it to the ticker with `set_probes` whenever it changes — which is what parks the thread when
 the last stale repo returns, and wakes it on a live → stale transition.
@@ -272,7 +272,7 @@ The wait is `rx.recv()` where nothing is outstanding and the stale set is empty,
 those are the only times one is. It checks `ticker.wedged(WEDGE_LIMIT)` and the worker's on each
 event and on every expiry. A path named by either is dropped from the work that named it, its row marked *not
 responding*, and that thread replaced — `abandon` the old one, `spawn` a new one, and re-post: the
-ticker's remaining probes, or every job with no delta yet. Nothing else moves the `!` or the watch
+ticker's remaining probes, or every job with no findings yet. Nothing else moves the `!` or the watch
 table.
 
 Keys: `↑↓/jk`, `enter` (acts only on `+ Add repo…`), `a`, `d`, `r`, `q`, and `PgUp`/`PgDn`/`home` for
@@ -320,7 +320,7 @@ for three seconds with the screen showing the wait. Success unlinks it and start
 unlinks it and exits non-zero.
 
 The quit path — `q` and handover alike — blanks `.take`, drops the handle, calls
-`ratatui::restore()`, and exits 0. An in-flight scan's delta is dropped unwritten.
+`ratatui::restore()`, and exits 0. An in-flight scan's findings are dropped unwritten.
 
 ## 10 — Watcher and the stale ticker
 
@@ -374,7 +374,7 @@ spawn the built binary — `env!("CARGO_BIN_EXE_gng")` — with `--storage=<that
 - `cargo test` — the full list from the spec's Tests section.
 - Run `./target/debug/gng`, add this repo, commit from another terminal, and watch the XP arrive with
   no keypress; check that keys stay responsive through a first scan and that the row holds its
-  previous total until the delta lands.
+  previous total until the findings land.
 - Start a second `gng` and take "Move it here": the first exits 0 with `.take` blanked.
 - `mv` a registered repo away and back with the app idle: the row dims, then recovers on its own with
   no keypress.
