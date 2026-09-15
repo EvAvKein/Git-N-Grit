@@ -2,6 +2,7 @@
 
 pub mod event;
 pub mod git;
+pub mod model;
 pub mod probe;
 pub mod reflog;
 pub mod scan;
