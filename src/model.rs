@@ -5,9 +5,6 @@
 //! the [worker](crate::scan)'s and the [ticker](crate::stale)'s answers,
 //! arriving as [`AppEvent`]s; this decides what they mean for a repo.
 
-// No caller outside this module's own tests yet.
-#![allow(dead_code)]
-
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
