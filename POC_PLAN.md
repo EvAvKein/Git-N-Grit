@@ -277,7 +277,7 @@ in a call that could wedge, which is what lets `Controller` block on the channel
 work it lost, and returns the paths that matched no tracked repo — a typed path belongs to none, so
 the caller is left to report it wherever such a path is shown.
 
-`mark(id) -> Option<InactiveReason>` is why a repo earns nothing right now, checked in the order the
+`inactive_reason(id) -> Option<InactiveReason>` is why a repo earns nothing right now, checked in the order the
 answers displace each other: a wedged filesystem outranks everything, since it is the only one that
 can be current; then `Duplicate`, then `stale`, then `ownership`, then a stored `error`, then
 `no_email`. A shadowed repo is never scanned, so nothing a scan determined is current for it either.
@@ -289,7 +289,7 @@ back `Registered`; `Match::Selection` comes back `Pick`, `offer_new` false only 
 store is already named by a registered repo, so a second one could not double-count it.
 
 Everything else records its outcome on the repo itself rather than returning it: a state file that
-will not write or delete becomes an `error`, read later through `mark`. `bank` applies findings,
+will not write or delete becomes an `error`, read later through `inactive_reason`. `bank` applies findings,
 crossing a repo between the watcher and the ticker only on what this scan itself resolved — a stale
 result never takes back a live repo's ownership answer, since it never asked.
 
@@ -325,7 +325,7 @@ Keys: `↑↓/jk`, `enter` (acts only on `+ Add repo…`), `a`, `d`, `r`, `q`, a
 the right pane. In the prompt every key is text, and only enter and esc leave it. Esc from the list
 does nothing. No mouse capture is enabled and no mouse events are read.
 
-## 9 — `ui.rs`
+## 9 — `ui.rs` ✅
 
 `Layout::horizontal` at 45/55, the left constrained to 28…40 columns. Left pane: `+ Add repo…`, then
 one row per repo with its total, `>` on the selection, scrolled to keep the selection visible, rows
@@ -341,6 +341,9 @@ renders the spec's one-line reason in place of the list. An empty list renders n
 
 Relative times run off the startup offset, with civil dates from a days-to-y/m/d conversion in the
 module.
+
+`draw` reads only through `Controller`'s accessors — `row`, `state`, `inactive_reason`, `bad_file` — and
+never reaches the `Model` behind them.
 
 ## 10 — `lock.rs` and `main.rs`
 

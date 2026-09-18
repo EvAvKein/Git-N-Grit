@@ -264,7 +264,7 @@ impl Model {
     /// Why this row is dimmed, in the order the answers displace each other: a
     /// wedged filesystem is the only one that can be current where it applies,
     /// and a shadowed repo is never scanned, so nothing a scan determined is.
-    pub fn mark(&self, id: Uuid) -> Option<InactiveReason> {
+    pub fn inactive_reason(&self, id: Uuid) -> Option<InactiveReason> {
         let state = self.state(id)?;
         if self.touches_wedged(state) {
             return Some(InactiveReason::NotResponding);
@@ -404,7 +404,7 @@ impl Model {
         if matches!(state.duplicate, Duplicate::Shadowed | Duplicate::Undecided) {
             return;
         }
-        // `mark` reads the same paths, so the row already says so.
+        // `inactive_reason` reads the same paths, so the row already says so.
         if self.touches_wedged(state) {
             return;
         }
@@ -611,7 +611,7 @@ impl Model {
 
     /// Take this path out of every thread's reach, and say whether any row is
     /// on it. A typed one belongs to none, so it has nowhere but the prompt to
-    /// be reported. `mark` reads `wedged`, so the rows need no marking here.
+    /// be reported. `inactive_reason` reads `wedged`, so the rows need no marking here.
     pub(crate) fn mark_not_responding(&mut self, path: &Path) -> bool {
         self.wedged.insert(path.to_path_buf());
         self.repos.iter().any(|state| path_of(state, path))
@@ -828,7 +828,7 @@ mod tests {
 
         assert_eq!(harness.model.state(id).expect("the repo").total_xp, 222);
         assert_eq!(
-            harness.model.mark(id).map(|m| m.to_string()),
+            harness.model.inactive_reason(id).map(|m| m.to_string()),
             Some("last scan failed: fatal: not a git repository".into())
         );
     }
@@ -841,7 +841,10 @@ mod tests {
 
         harness.deliver(id, gone());
 
-        assert_eq!(harness.model.mark(id), Some(InactiveReason::Moved));
+        assert_eq!(
+            harness.model.inactive_reason(id),
+            Some(InactiveReason::Moved)
+        );
         assert_eq!(harness.model.state(id).expect("the repo").total_xp, 222);
         assert!(harness.stale(id));
     }
@@ -854,7 +857,7 @@ mod tests {
 
         harness.deliver(id, earning(222));
 
-        assert_eq!(harness.model.mark(id), None);
+        assert_eq!(harness.model.inactive_reason(id), None);
         assert_eq!(harness.model.state(id).expect("the repo").total_xp, 222);
         assert!(!harness.stale(id));
     }
@@ -867,7 +870,10 @@ mod tests {
 
         harness.deliver(id, owned(Ownership::Foreign));
 
-        assert_eq!(harness.model.mark(id), Some(InactiveReason::Foreign));
+        assert_eq!(
+            harness.model.inactive_reason(id),
+            Some(InactiveReason::Foreign)
+        );
         assert!(!harness.stale(id));
     }
 
@@ -879,7 +885,10 @@ mod tests {
 
         harness.deliver(id, owned(Ownership::Rerooted));
 
-        assert_eq!(harness.model.mark(id), Some(InactiveReason::Rerooted));
+        assert_eq!(
+            harness.model.inactive_reason(id),
+            Some(InactiveReason::Rerooted)
+        );
         assert_eq!(harness.model.state(id).expect("the repo").total_xp, 222);
     }
 
@@ -891,7 +900,10 @@ mod tests {
 
         harness.deliver(id, owned(Ownership::NotYet));
 
-        assert_eq!(harness.model.mark(id), Some(InactiveReason::Moved));
+        assert_eq!(
+            harness.model.inactive_reason(id),
+            Some(InactiveReason::Moved)
+        );
         assert!(harness.stale(id));
     }
 
@@ -910,7 +922,10 @@ mod tests {
 
         harness.deliver(id, ScanFindings::default());
 
-        assert_eq!(harness.model.mark(id), Some(InactiveReason::NoEmail));
+        assert_eq!(
+            harness.model.inactive_reason(id),
+            Some(InactiveReason::NoEmail)
+        );
     }
 
     #[test]
@@ -922,7 +937,10 @@ mod tests {
 
         harness.model.mark_not_responding(&common_dir);
 
-        assert_eq!(harness.model.mark(id), Some(InactiveReason::NotResponding));
+        assert_eq!(
+            harness.model.inactive_reason(id),
+            Some(InactiveReason::NotResponding)
+        );
     }
 
     #[test]
@@ -949,7 +967,10 @@ mod tests {
         harness.model.queue_scan(id);
 
         assert!(!harness.scanning(id));
-        assert_eq!(harness.model.mark(id), Some(InactiveReason::NotResponding));
+        assert_eq!(
+            harness.model.inactive_reason(id),
+            Some(InactiveReason::NotResponding)
+        );
     }
 
     #[test]
@@ -978,7 +999,10 @@ mod tests {
             },
         );
 
-        assert_eq!(harness.model.mark(id), Some(InactiveReason::Moved));
+        assert_eq!(
+            harness.model.inactive_reason(id),
+            Some(InactiveReason::Moved)
+        );
         assert!(harness.stale(id));
         assert!(harness.model.watches.is_empty());
     }

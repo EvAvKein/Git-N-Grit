@@ -12,9 +12,9 @@ use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKin
 use uuid::Uuid;
 
 use crate::event::AppEvent;
-use crate::model::{AddOutcome, Model};
+use crate::model::{AddOutcome, InactiveReason, Model};
 use crate::scan::Resolved;
-use crate::state::{RepoState, Storage};
+use crate::state::{LoadError, RepoState, Storage};
 
 /// A line of the left pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +175,23 @@ impl Controller {
 
     pub fn storage(&self) -> &Storage {
         self.model.storage()
+    }
+
+    /// Why a repo is dimmed, for the row and the right pane's `!` message.
+    pub fn inactive_reason(&self, id: Uuid) -> Option<InactiveReason> {
+        self.model.inactive_reason(id)
+    }
+
+    /// A repo's state by id, for the picker's candidates — not just the
+    /// selected row.
+    pub fn state(&self, id: Uuid) -> Option<&RepoState> {
+        self.model.state(id)
+    }
+
+    /// Why a state file didn't load, for the right pane on a selected
+    /// [`Row::BadFile`].
+    pub fn bad_file(&self, path: &Path) -> Option<&LoadError> {
+        self.model.bad_file(path)
     }
 
     /// How many event rows the right pane fits, for `PgUp`/`PgDn` to move by.
@@ -576,7 +593,7 @@ mod tests {
         harness.press(KeyCode::Char('r'));
 
         assert!(harness.controller.model.is_scanning(id));
-        assert_eq!(harness.controller.model.mark(id), None);
+        assert_eq!(harness.controller.model.inactive_reason(id), None);
     }
 
     #[test]
@@ -719,7 +736,7 @@ mod tests {
             harness
                 .controller
                 .model
-                .mark(id)
+                .inactive_reason(id)
                 .is_some_and(|m| m.to_string().starts_with("could not remove"))
         );
     }
