@@ -130,6 +130,24 @@ fn a_killed_holder_leaves_a_line_the_next_instance_overwrites() {
 }
 
 #[test]
+fn a_handover_to_a_holder_that_cannot_answer_times_out_and_leaves_it_held() {
+    let fixture = Fixture::new();
+    let storage = storage(&fixture);
+    // Held with nothing watching for `.takeover` at all - as unresponsive to it
+    // as a holder frozen by `kill -STOP` would be.
+    let _lock = held(&storage);
+
+    let taken = lock::take_over(&storage).expect("taking over");
+
+    assert!(taken.is_none(), "the asker took a lock nobody let go of");
+    assert!(!storage.takeover_path().exists());
+    assert!(matches!(
+        lock::acquire(&storage).expect("acquiring"),
+        Acquired::Busy(_)
+    ));
+}
+
+#[test]
 fn a_handover_ends_the_holder_cleanly_and_hands_the_lock_over() {
     let fixture = Fixture::new();
     let storage = storage(&fixture);
