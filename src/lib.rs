@@ -3,6 +3,7 @@
 pub mod controller;
 pub mod event;
 pub mod git;
+pub mod lock;
 pub mod model;
 pub mod probe;
 pub mod reflog;

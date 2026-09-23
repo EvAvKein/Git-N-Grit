@@ -181,6 +181,15 @@ pub fn run_resolve(path: &Path, states: &[RepoState]) -> Result<Resolved> {
     resolve(path, states, &InFlight::default())
 }
 
+/// A leading `~` names the home directory. The shell does that for a typed
+/// command, but the add prompt's text reaches here as typed.
+fn expand_tilde(path: &Path) -> PathBuf {
+    match (path.strip_prefix("~"), dirs::home_dir()) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
 fn scan(state: &RepoState, verify_ownership: bool, in_flight: &InFlight) -> Result<ScanFindings> {
     let mut findings = ScanFindings::default();
 
@@ -252,7 +261,8 @@ fn scan(state: &RepoState, verify_ownership: bool, in_flight: &InFlight) -> Resu
 fn resolve(path: &Path, states: &[RepoState], in_flight: &InFlight) -> Result<Resolved> {
     // Absolute before git runs, so the stored path survives a later start from
     // another directory and names the same place the identity was read from.
-    let source_dir = watching(in_flight, path, || fs::canonicalize(path))
+    let path = expand_tilde(path);
+    let source_dir = watching(in_flight, &path, || fs::canonicalize(&path))
         .with_context(|| format!("resolving {}", path.display()))?;
     let identity = watching(in_flight, &source_dir, || {
         git::resolve_identity(&source_dir)
@@ -446,6 +456,15 @@ pub fn apply(state: &mut RepoState, findings: ScanFindings) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_leading_tilde_expands_to_home_and_nothing_else_does() {
+        let home = dirs::home_dir().expect("a home dir");
+        assert_eq!(expand_tilde(Path::new("~/x/y")), home.join("x/y"));
+        assert_eq!(expand_tilde(Path::new("~")), home);
+        assert_eq!(expand_tilde(Path::new("~x/y")), Path::new("~x/y"));
+        assert_eq!(expand_tilde(Path::new("/a/~/b")), Path::new("/a/~/b"));
+    }
+
     use super::*;
 
     const A: &str = "3f2a1b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6";

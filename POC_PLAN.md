@@ -345,7 +345,7 @@ module.
 `draw` reads only through `Controller`'s accessors — `row`, `state`, `inactive_reason`, `bad_file` — and
 never reaches the `Model` behind them.
 
-## 10 — `lock.rs` and `main.rs`
+## 10 — `lock.rs` and `main.rs` ✅
 
 `main` walks `std::env::args()` for `--storage=<path>` and `--storage <path>`, falling back to
 `dirs::data_dir()?.join("git-n-grit")`, and rejects anything else with a usage line and a non-zero
@@ -363,6 +363,12 @@ the two-option screen; without a terminal it prints the same to stdout and exits
 "Move it here" removes any `.takeover`, writes it with our pid, and retries `try_lock` every 50 ms
 for three seconds with the screen showing the wait. Success unlinks it and starts normally; timeout
 unlinks it and exits non-zero.
+
+`lock::acquire` answers `Held(Lock)` or `Busy(Holder)` and errors on the unreadable case; `take_over`
+is the handover, unlinking `.takeover` on every exit. The second-instance screen is
+`ui::draw_takeover`, drawn once for the wait rather than per poll, and esc closes it as `q` does. The
+handover tests run the real `Controller` loop in a thread with a no-op draw, since a spawned `gng`
+needs a terminal; the SIGKILL test holds the lock from a `sh` that `exec`s into `sleep`.
 
 The quit path — `q` and handover alike — blanks `.take`, drops the handle, calls
 `ratatui::restore()`, and exits 0. An in-flight scan's findings are dropped unwritten.

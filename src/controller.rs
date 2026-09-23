@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 
 use anyhow::Result;
-use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use uuid::Uuid;
 
 use crate::event::AppEvent;
@@ -204,6 +204,12 @@ impl Controller {
     fn on_key(&mut self, key: KeyEvent) {
         // A release would otherwise act a second time on every key.
         if key.kind == KeyEventKind::Release {
+            return;
+        }
+        // Raw mode turns off the terminal's SIGINT, so ctrl+c arrives as a key.
+        // It quits from any state, the prompt included.
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.quit = true;
             return;
         }
         match self.mode {
@@ -639,6 +645,22 @@ mod tests {
         };
         assert_eq!(input, "adrq");
         assert!(!harness.controller.quit);
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_the_list_and_from_the_prompt() {
+        for open_prompt in [false, true] {
+            let mut harness = Harness::settled(1);
+            if open_prompt {
+                harness.press(KeyCode::Char('a'));
+            }
+            let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            harness
+                .controller
+                .handle(AppEvent::Input(CtEvent::Key(key)))
+                .expect("handling ctrl+c");
+            assert!(harness.controller.quit, "prompt open: {open_prompt}");
+        }
     }
 
     #[test]

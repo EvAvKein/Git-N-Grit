@@ -1,5 +1,8 @@
 //! Throwaway git repos for the integration tests.
 
+// Each test binary uses its own subset.
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;

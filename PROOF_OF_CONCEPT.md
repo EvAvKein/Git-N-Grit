@@ -53,6 +53,14 @@ the terminal's to handle — selecting text across the panes works as it does in
 program. Esc backs out of any prompt, picker or confirm without acting; from the list itself there is
 nothing to back out of, and it does nothing.
 
+Ctrl+C quits from anywhere, prompt, picker and confirm included, by the path `q` takes. Raw mode turns
+off the terminal's SIGINT, so it arrives as a key. It is not on the key hint.
+
+Colour is sparing and drawn from the terminal's own ANSI palette: a cyan selection marker, green for
+XP earned, red for the `!` and for what says something is wrong; times and the key hint are dimmed.
+`NO_COLOR` set and non-empty turns it off. Nothing depends on it — dimming, the `!` and the reason
+text carry every state — and themes stay out of scope.
+
 The panes split 45/55, with the left one floored at 28 columns and capped at 40 — a total is worth
 more than the tail of a long label, and a repo row is worth more than an empty gutter.
 
@@ -490,10 +498,11 @@ live `git_common_dir`.
 [Repo identity](#repo-identity) succeeds, so worktrees and `.git`-as-a-file both work; a worktree
 reports its own `…/.git/worktrees/<name>`, which has a `logs/HEAD` of its own. `--path-format=absolute`
 is what makes that usable — plain `--git-dir` answers a bare relative `.git`. A rejected path shows
-an inline error and leaves the prompt open.
+an inline error and leaves the prompt open. A leading `~` is the home directory, which the shell would
+otherwise have expanded; `~user` is not.
 
 While the prompt is open its keys are text — `a`, `d`, `r` and `q` type themselves rather than
-command — so enter and esc are the only ways out of it, submitting and abandoning.
+command — so enter and esc are the only ways out of it, submitting and abandoning. Ctrl+C quits the app.
 
 Resolving a typed path means running `git` in it and stat-ing what is already registered, so enter
 hands the path to the [scan worker](#scanning) rather than doing either on the main thread. The

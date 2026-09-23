@@ -5,7 +5,7 @@ use std::path::{Component, Path};
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use uuid::Uuid;
@@ -17,17 +17,88 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
+/// The colours in use. Named ANSI colours only, so the terminal's own theme
+/// decides what they look like. Bold and dim are modifiers, not colours, and
+/// survive `NO_COLOR`.
+#[derive(Debug, Clone, Copy)]
+pub struct Palette {
+    color: bool,
+}
+
+impl Palette {
+    /// Colour unless `NO_COLOR` is set and non-empty, per no-color.org.
+    pub fn detect() -> Palette {
+        Palette {
+            color: std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
+        }
+    }
+
+    pub fn plain() -> Palette {
+        Palette { color: false }
+    }
+
+    #[cfg(test)]
+    fn colored() -> Palette {
+        Palette { color: true }
+    }
+
+    fn tint(self, color: Color) -> Style {
+        if self.color {
+            Style::default().fg(color)
+        } else {
+            Style::default()
+        }
+    }
+
+    /// The selection marker.
+    fn accent(self) -> Style {
+        self.tint(Color::Cyan)
+    }
+
+    /// XP earned.
+    fn gain(self) -> Style {
+        self.tint(Color::Green)
+    }
+
+    /// What is not working.
+    fn alert(self) -> Style {
+        self.tint(Color::Red)
+    }
+}
+
+fn dim() -> Style {
+    Style::default().add_modifier(Modifier::DIM)
+}
+
+fn bold() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
+}
+
+/// `> ` on the selected line and blanks on the rest, so lines stay aligned.
+fn marker(selected: bool, palette: Palette) -> Span<'static> {
+    if selected {
+        Span::styled("> ", palette.accent())
+    } else {
+        Span::raw("  ")
+    }
+}
+
 /// Draw one frame. `utc_offset_secs` is [`crate::git::local_utc_offset`], read
 /// once at startup and handed down rather than called here.
-pub fn draw(frame: &mut Frame, controller: &mut Controller, utc_offset_secs: i32) {
+pub fn draw(
+    frame: &mut Frame,
+    controller: &mut Controller,
+    utc_offset_secs: i32,
+    palette: Palette,
+) {
     let area = frame.area();
     let [main, hint] = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(area);
     let left_width = ((main.width as u32 * 45 / 100) as u16).clamp(28, 40);
     let [left, right] =
         Layout::horizontal([Constraint::Length(left_width), Constraint::Min(0)]).areas(main);
 
-    render_left(frame, left, controller);
-    render_right(frame, right, controller, utc_offset_secs);
+    render_left(frame, left, controller, palette);
+    render_right(frame, right, controller, utc_offset_secs, palette);
     render_hint(frame, hint);
 
     match controller.mode() {
@@ -36,21 +107,21 @@ pub fn draw(frame: &mut Frame, controller: &mut Controller, utc_offset_secs: i32
             input,
             error,
             checking,
-        } => render_prompt(frame, area, input, error.as_deref(), *checking),
+        } => render_prompt(frame, area, input, error.as_deref(), *checking, palette),
         UiState::Picker {
             lines,
             selected_line,
             ..
-        } => render_picker(frame, area, controller, lines, *selected_line),
+        } => render_picker(frame, area, controller, lines, *selected_line, palette),
         UiState::ConfirmRemove { target, confirmed } => {
-            render_confirm(frame, area, controller, target, *confirmed)
+            render_confirm(frame, area, controller, target, *confirmed, palette)
         }
     }
 }
 
 // ---- left pane -------------------------------------------------------
 
-fn render_left(frame: &mut Frame, area: Rect, controller: &Controller) {
+fn render_left(frame: &mut Frame, area: Rect, controller: &Controller, palette: Palette) {
     let block = Block::bordered().title(" Git-N-Grit ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -62,41 +133,51 @@ fn render_left(frame: &mut Frame, area: Rect, controller: &Controller) {
 
     let mut lines = Vec::with_capacity(visible);
     for i in top..total.min(top + visible) {
-        let marker = if i == controller.selected() {
-            "> "
-        } else {
-            "  "
-        };
-        let (text, dim) = match controller.row(i) {
-            Some(Row::Add) => ("+ Add repo…".to_string(), false),
+        let selected = i == controller.selected();
+        let (label, xp, inactive) = match controller.row(i) {
+            Some(Row::Add) => ("+ Add repo…".to_string(), None, false),
             Some(Row::Repo(id)) => {
                 let label = labels.get(&id).cloned().unwrap_or_default();
                 let xp = controller.state(id).map(|s| s.total_xp).unwrap_or_default();
-                (
-                    format!("{label} {}xp", comma(xp)),
-                    controller.inactive_reason(id).is_some(),
-                )
+                (label, Some(xp), controller.inactive_reason(id).is_some())
             }
             Some(Row::BadFile(path)) => {
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.display().to_string());
-                (name, true)
+                (name, None, true)
             }
             None => continue,
         };
-        let style = if dim {
-            Style::default().add_modifier(Modifier::DIM)
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(vec![
-            Span::raw(marker),
-            Span::styled(text, style),
-        ]));
+        lines.push(left_row(&label, xp, inactive, selected, palette));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// One left-pane row. `xp` is `None` where the row has no total.
+fn left_row(
+    label: &str,
+    xp: Option<u64>,
+    inactive: bool,
+    selected: bool,
+    palette: Palette,
+) -> Line<'static> {
+    let mut style = if inactive { dim() } else { Style::default() };
+    if selected {
+        style = style.patch(bold());
+    }
+    let mut spans = vec![
+        marker(selected, palette),
+        Span::styled(label.to_string(), style),
+    ];
+    if inactive {
+        spans.push(Span::styled(" !", style.patch(palette.alert())));
+    }
+    if let Some(xp) = xp {
+        spans.push(Span::styled(format!(" {}xp", comma(xp)), style));
+    }
+    Line::from(spans)
 }
 
 /// Every registered repo's display label, keyed by id — extended leftward on
@@ -176,7 +257,13 @@ fn left_scroll_top(selected: usize, total: usize, visible: usize) -> usize {
 
 // ---- right pane -------------------------------------------------------
 
-fn render_right(frame: &mut Frame, area: Rect, controller: &mut Controller, utc_offset_secs: i32) {
+fn render_right(
+    frame: &mut Frame,
+    area: Rect,
+    controller: &mut Controller,
+    utc_offset_secs: i32,
+    palette: Palette,
+) {
     let block = Block::bordered();
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -200,7 +287,7 @@ fn render_right(frame: &mut Frame, area: Rect, controller: &mut Controller, utc_
                 inner,
             );
         }
-        Row::Repo(id) => render_repo_pane(frame, inner, controller, id, utc_offset_secs),
+        Row::Repo(id) => render_repo_pane(frame, inner, controller, id, utc_offset_secs, palette),
     }
 }
 
@@ -210,6 +297,7 @@ fn render_repo_pane(
     controller: &mut Controller,
     id: Uuid,
     utc_offset_secs: i32,
+    palette: Palette,
 ) {
     let Some(state) = controller.state(id) else {
         return;
@@ -220,7 +308,11 @@ fn render_repo_pane(
 
     if let Some(reason) = controller.inactive_reason(id) {
         frame.render_widget(
-            Paragraph::new(vec![header, Line::from(""), Line::from(reason.to_string())]),
+            Paragraph::new(vec![
+                header,
+                Line::from(""),
+                Line::styled(reason.to_string(), palette.alert()),
+            ]),
             inner,
         );
         return;
@@ -241,7 +333,7 @@ fn render_repo_pane(
         .take(event_rows)
     {
         lines.push(event_time_line(event, now, utc_offset_secs));
-        lines.push(event_stat_line(event));
+        lines.push(event_stat_line(event, palette));
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -253,16 +345,22 @@ fn event_time_line(event: &Event, now: i64, utc_offset_secs: i32) -> Line<'stati
     } else {
         event.subject.clone()
     };
-    Line::from(format!("{time}  {subject}"))
+    Line::from(vec![
+        Span::styled(time, dim()),
+        Span::raw(format!("  {subject}")),
+    ])
 }
 
-fn event_stat_line(event: &Event) -> Line<'static> {
+fn event_stat_line(event: &Event, palette: Palette) -> Line<'static> {
     let stats = if event.rewrite {
         "rewritten".to_string()
     } else {
         format!("+{} −{}", event.added, event.deleted)
     };
-    Line::from(format!("          {stats}  +{}xp", event.xp))
+    Line::from(vec![
+        Span::raw(format!("          {stats}  ")),
+        Span::styled(format!("+{}xp", event.xp), palette.gain()),
+    ])
 }
 
 fn display_path(path: &Path) -> String {
@@ -333,8 +431,11 @@ fn comma(n: u64) -> String {
 
 fn render_hint(frame: &mut Frame, area: Rect) {
     let lines = vec![
-        Line::from("  ↑↓/jk move   enter select   a add   d remove"),
-        Line::from("  r refresh   PgUp/PgDn scroll   home newest   q quit"),
+        Line::styled("  ↑↓/jk move   enter select   a add   d remove", dim()),
+        Line::styled(
+            "  r refresh   PgUp/PgDn scroll   home newest   q quit",
+            dim(),
+        ),
     ];
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -349,7 +450,14 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     Rect::new(x, y, width, height)
 }
 
-fn render_prompt(frame: &mut Frame, area: Rect, input: &str, error: Option<&str>, checking: bool) {
+fn render_prompt(
+    frame: &mut Frame,
+    area: Rect,
+    input: &str,
+    error: Option<&str>,
+    checking: bool,
+    palette: Palette,
+) {
     let popup = centered(area, 60, 5);
     frame.render_widget(Clear, popup);
     let block = Block::bordered().title(" Git-N-Grit ");
@@ -358,9 +466,9 @@ fn render_prompt(frame: &mut Frame, area: Rect, input: &str, error: Option<&str>
 
     let mut lines = vec![Line::from(format!("  Path: {input}"))];
     if checking {
-        lines.push(Line::from("  checking…"));
+        lines.push(Line::styled("  checking…", dim()));
     } else if let Some(error) = error {
-        lines.push(Line::from(format!("  {error}")));
+        lines.push(Line::styled(format!("  {error}"), palette.alert()));
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -371,6 +479,7 @@ fn render_picker(
     controller: &Controller,
     lines: &[RepoSelection],
     selected_line: usize,
+    palette: Palette,
 ) {
     let popup = centered(area, 60, (lines.len() as u16 + 2).max(3));
     frame.render_widget(Clear, popup);
@@ -382,7 +491,7 @@ fn render_picker(
         .iter()
         .enumerate()
         .map(|(i, line)| {
-            let marker = if i == selected_line { "> " } else { "  " };
+            let selected = i == selected_line;
             let text = match line {
                 RepoSelection::Tracked(id) => match controller.state(*id) {
                     Some(state) => {
@@ -397,7 +506,8 @@ fn render_picker(
                 },
                 RepoSelection::New => "new repo".to_string(),
             };
-            Line::from(format!("{marker}{text}"))
+            let style = if selected { bold() } else { Style::default() };
+            Line::from(vec![marker(selected, palette), Span::styled(text, style)])
         })
         .collect();
     frame.render_widget(Paragraph::new(rendered), inner);
@@ -409,6 +519,7 @@ fn render_confirm(
     controller: &Controller,
     target: &Row,
     confirmed: bool,
+    palette: Palette,
 ) {
     let popup = centered(area, 55, 7);
     frame.render_widget(Clear, popup);
@@ -442,8 +553,69 @@ fn render_confirm(
         Row::Add => vec![],
     };
     lines.push(Line::from(""));
-    lines.push(Line::from(if confirmed { "  Cancel" } else { "> Cancel" }));
-    lines.push(Line::from(if confirmed { "> Remove" } else { "  Remove" }));
+    lines.push(Line::from(vec![
+        marker(!confirmed, palette),
+        Span::raw("Cancel"),
+    ]));
+    lines.push(Line::from(vec![
+        marker(confirmed, palette),
+        Span::styled("Remove", palette.alert()),
+    ]));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+// ---- second instance ----------------------------------------------------
+
+/// What the second-instance screen is showing.
+pub enum TakeoverScreen {
+    /// The two options, with the second selected where `move_here`.
+    Choose { move_here: bool },
+    /// The handover file is written and the lock not yet ours.
+    Waiting,
+}
+
+/// `holder` is [`crate::lock::Holder::describe`].
+pub fn draw_takeover(frame: &mut Frame, holder: &str, screen: &TakeoverScreen, palette: Palette) {
+    let area = frame.area();
+    let [main, hint] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+    let block = Block::bordered().title(" Git-N-Grit ");
+    let inner = block.inner(main);
+    frame.render_widget(block, main);
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from("  Git-N-Grit is already open in another terminal"),
+        Line::from(""),
+        Line::from(format!("    {holder}")),
+        Line::from(""),
+    ];
+    match screen {
+        TakeoverScreen::Choose { move_here } => {
+            let option = |selected: bool, text: &'static str| {
+                let style = if selected { bold() } else { Style::default() };
+                Line::from(vec![
+                    Span::raw("  "),
+                    marker(selected, palette),
+                    Span::styled(text, style),
+                ])
+            };
+            lines.push(option(
+                !move_here,
+                "Close this one, leave the other running",
+            ));
+            lines.push(option(
+                *move_here,
+                "Move it here — the other one will close",
+            ));
+            frame.render_widget(
+                Paragraph::new(Line::styled("  ↑↓/jk move   enter select   q quit", dim())),
+                hint,
+            );
+        }
+        TakeoverScreen::Waiting => {
+            lines.push(Line::styled("  Waiting for the other one to close…", dim()));
+        }
+    }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -567,6 +739,56 @@ mod tests {
         assert_eq!(left_scroll_top(2, 3, 5), 0); // fewer rows than fit
     }
 
+    fn colours(line: &Line) -> Vec<Option<Color>> {
+        line.spans.iter().map(|span| span.style.fg).collect()
+    }
+
+    #[test]
+    fn an_inactive_row_carries_a_red_bang_before_its_total() {
+        let line = left_row("old/thing", Some(210), true, false, Palette::colored());
+        assert_eq!(line.to_string(), "  old/thing ! 210xp");
+        assert!(colours(&line).contains(&Some(Color::Red)));
+    }
+
+    #[test]
+    fn a_bad_file_row_carries_the_bang_and_no_total() {
+        let line = left_row("abc.json", None, true, false, Palette::plain());
+        assert_eq!(line.to_string(), "  abc.json !");
+    }
+
+    #[test]
+    fn a_healthy_row_has_no_bang_and_the_selection_is_marked() {
+        let line = left_row("dotfiles", Some(380), false, true, Palette::colored());
+        assert_eq!(line.to_string(), "> dotfiles 380xp");
+        assert_eq!(colours(&line)[0], Some(Color::Cyan));
+    }
+
+    #[test]
+    fn the_plain_palette_paints_no_colour_and_keeps_the_dimming() {
+        let line = left_row("old/thing", Some(210), true, true, Palette::plain());
+        assert!(colours(&line).iter().all(Option::is_none));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::DIM));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn gains_are_green_only_with_colour_and_the_text_is_the_same() {
+        let event = Event {
+            sha: "a".into(),
+            timestamp: 0,
+            subject: "feat".into(),
+            added: 3,
+            deleted: 1,
+            xp: 6,
+            rewrite: false,
+        };
+        let colour = event_stat_line(&event, Palette::colored());
+        let plain = event_stat_line(&event, Palette::plain());
+        assert_eq!(colour.to_string(), plain.to_string());
+        assert_eq!(colours(&colour).last(), Some(&Some(Color::Green)));
+        assert!(colours(&plain).iter().all(Option::is_none));
+    }
+
     #[test]
     fn a_rewrite_line_reads_rewritten_rather_than_a_diffstat() {
         let event = Event {
@@ -583,7 +805,7 @@ mod tests {
             "0m ago  fix: off-by-one (redo)"
         );
         assert_eq!(
-            event_stat_line(&event).to_string(),
+            event_stat_line(&event, Palette::plain()).to_string(),
             "          rewritten  +2xp"
         );
     }
@@ -600,7 +822,7 @@ mod tests {
             rewrite: false,
         };
         assert_eq!(
-            event_stat_line(&event).to_string(),
+            event_stat_line(&event, Palette::plain()).to_string(),
             "          +120 −34  +222xp"
         );
     }
