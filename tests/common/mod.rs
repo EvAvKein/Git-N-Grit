@@ -4,12 +4,12 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use gng::git::resolve_identity;
 use gng::scan::{ScanFindings, apply, run_scan, run_verify};
-use gng::state::RepoState;
+use gng::state::{Match, RepoState, Storage, match_identity, share_a_root_commit};
 use uuid::Uuid;
 
 /// The identity every test commits under, and what each repo's local
@@ -53,6 +53,27 @@ impl Fixture {
             dir,
             hooks: self.root.join("hooks"),
         }
+    }
+
+    /// `git clone` from `source`, isolated the same way `repo()` is.
+    pub fn clone_of(&self, source: &Repo, name: &str) -> Repo {
+        let dir = self.root.join(name);
+        let out = Command::new("git")
+            .arg("clone")
+            .arg(&source.dir)
+            .arg(&dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("cloning");
+        assert!(
+            out.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let repo = self.attach(dir);
+        repo.isolate();
+        repo
     }
 }
 
@@ -185,4 +206,74 @@ pub fn verify(state: &RepoState) -> ScanFindings {
 /// of one that reached git not at all.
 pub fn reached_git(findings: &ScanFindings) -> bool {
     findings.ownership.is_some()
+}
+
+/// What resolving an add would produce. Mirrors `Model::resolve_add`, which
+/// integration tests cannot reach directly since it is crate-private — this
+/// replicates its decision against `Storage` and `state::match_identity` alone.
+pub enum Added {
+    Registered(RepoState),
+    Pick {
+        candidates: Vec<RepoState>,
+        offer_new: bool,
+    },
+}
+
+/// Resolve `repo`'s identity against what is already registered, as the add
+/// prompt would.
+pub fn add(storage: &Storage, repo: &Repo) -> Added {
+    let identity = repo.identity();
+    let loaded = storage.load_all();
+    assert!(
+        loaded.errors.is_empty(),
+        "bad state files: {:?}",
+        loaded.errors
+    );
+
+    match match_identity(&loaded.repos, &identity, |p: &Path| p.exists()) {
+        Match::Reuse(id) => {
+            let mut state = loaded
+                .repos
+                .into_iter()
+                .find(|s| s.id == id)
+                .expect("match_identity named a state that was loaded");
+            storage
+                .adopt(&mut state, &identity, &repo.dir)
+                .expect("adopting");
+            Added::Registered(state)
+        }
+        Match::New => Added::Registered(register_new(storage, repo)),
+        Match::Selection(ids) => {
+            let store = &identity.git_common_dir;
+            let already_registered = loaded.repos.iter().any(|s| {
+                ids.contains(&s.id)
+                    && &s.git_common_dir == store
+                    && share_a_root_commit(&s.root_commits, &identity.root_commits)
+            });
+            let candidates = loaded
+                .repos
+                .into_iter()
+                .filter(|s| ids.contains(&s.id))
+                .collect();
+            Added::Pick {
+                candidates,
+                offer_new: !already_registered,
+            }
+        }
+    }
+}
+
+/// A first-time add, and the "new repo" pick at the picker, both take this path.
+pub fn register_new(storage: &Storage, repo: &Repo) -> RepoState {
+    let state = RepoState::new(&repo.identity(), &repo.dir);
+    storage.save(&state).expect("saving");
+    state
+}
+
+/// Taking an existing row at the picker.
+pub fn register_into(storage: &Storage, mut state: RepoState, repo: &Repo) -> RepoState {
+    storage
+        .adopt(&mut state, &repo.identity(), &repo.dir)
+        .expect("adopting");
+    state
 }

@@ -287,6 +287,11 @@ pub enum Match {
 /// parameter rather than a `Path::exists` call so the rules test without a
 /// disk, and so the scan worker can publish each path it is about to stat —
 /// any one of these candidates can be the one that hangs.
+/// Whether two histories share a root commit.
+pub fn share_a_root_commit(a: &[String], b: &[String]) -> bool {
+    a.iter().any(|c| b.contains(c))
+}
+
 pub fn match_identity(
     states: &[RepoState],
     identity: &RepoIdentity,
@@ -303,9 +308,7 @@ pub fn match_identity(
             let related = if s.root_commits.is_empty() || identity.root_commits.is_empty() {
                 same_store(s)
             } else {
-                s.root_commits
-                    .iter()
-                    .any(|c| identity.root_commits.contains(c))
+                share_a_root_commit(&s.root_commits, &identity.root_commits)
             };
             // A store that has moved is still that store; one that hasn't, and
             // sits elsewhere, is a different clone of the same upstream.

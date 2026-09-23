@@ -21,7 +21,9 @@ use uuid::Uuid;
 use crate::event::AppEvent;
 use crate::scan::{self, Job, Resolved, ScanFindings, Worker};
 use crate::stale::{Probe, Ticker};
-use crate::state::{Duplicate, LoadError, Match, Ownership, RepoState, Storage};
+use crate::state::{
+    Duplicate, LoadError, Match, Ownership, RepoState, Storage, share_a_root_commit,
+};
 
 /// A filesystem call outstanding this long is one nothing can free.
 pub const WEDGE_LIMIT: Duration = Duration::from_secs(10);
@@ -347,13 +349,18 @@ impl Model {
             Match::Reuse(id) => AddOutcome::Registered(self.register_into(*id, &resolved)),
             Match::New => AddOutcome::Registered(self.register_new(&resolved)),
             Match::Selection(candidates) => {
-                // A second state file on a store already registered would watch
-                // that reflog alongside the first, and both would score it.
+                // A candidate at this exact store, correctly rooted, is what
+                // "new" would double-count — an unrelated occupant is not.
                 let store = &resolved.identity.git_common_dir;
-                let offer_new = !self.repos.iter().any(|s| &s.git_common_dir == store);
+                let already_registered = candidates.iter().any(|id| {
+                    self.state(*id).is_some_and(|s| {
+                        &s.git_common_dir == store
+                            && share_a_root_commit(&s.root_commits, &resolved.identity.root_commits)
+                    })
+                });
                 AddOutcome::Pick {
                     candidates: candidates.clone(),
-                    offer_new,
+                    offer_new: !already_registered,
                     resolved,
                 }
             }

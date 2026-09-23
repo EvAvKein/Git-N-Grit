@@ -546,15 +546,15 @@ mod tests {
         }
 
         /// The worker's answer to the resolve the prompt just posted, for a
-        /// repo whose files are at `source_dir`.
-        fn answer(&mut self, matched: Match, source_dir: PathBuf) {
+        /// repo whose files are at `source_dir` and whose history has `roots`.
+        fn answer(&mut self, matched: Match, source_dir: PathBuf, roots: &[&str]) {
             let seq = self.controller.seq;
             self.controller
                 .handle(AppEvent::Resolved {
                     seq,
                     result: Ok(Resolved {
                         identity: RepoIdentity {
-                            root_commits: vec!["added-root".into()],
+                            root_commits: roots.iter().map(|r| r.to_string()).collect(),
                             git_common_dir: source_dir.join(".git"),
                             head_subdir: PathBuf::new(),
                         },
@@ -821,13 +821,40 @@ mod tests {
         harness.type_path("/repo");
         harness.press(KeyCode::Enter);
 
-        // The store it resolved to is the one that row already names.
-        harness.answer(Match::Selection(vec![id]), harness.root.join("r0"));
+        // The store it resolved to is the one that row already names, with
+        // the same history.
+        harness.answer(
+            Match::Selection(vec![id]),
+            harness.root.join("r0"),
+            &["r0-root"],
+        );
         harness.press(KeyCode::Down);
         harness.press(KeyCode::Enter);
 
         // Adopted into the one candidate rather than minted beside it.
         assert_eq!(harness.controller.row_count(), 2);
+    }
+
+    /// Git cannot tell this from r0's own history rewritten in place, so the
+    /// picker leaves "new repo" on offer rather than guessing.
+    #[test]
+    fn the_picker_offers_new_repo_over_an_occupant_with_unrelated_history() {
+        let mut harness = Harness::settled(1);
+        let id = harness.id(0);
+        harness.press(KeyCode::Char('a'));
+        harness.type_path("/repo");
+        harness.press(KeyCode::Enter);
+
+        // The store is the one r0 names, but nothing about its history is r0's.
+        harness.answer(
+            Match::Selection(vec![id]),
+            harness.root.join("r0"),
+            &["unrelated-root"],
+        );
+        harness.press(KeyCode::Down);
+        harness.press(KeyCode::Enter);
+
+        assert_eq!(harness.controller.row_count(), 3);
     }
 
     #[test]
@@ -839,23 +866,36 @@ mod tests {
         harness.press(KeyCode::Enter);
 
         // A store no row names, the candidate's own having moved away.
-        harness.answer(Match::Selection(vec![id]), harness.root.join("elsewhere"));
+        harness.answer(
+            Match::Selection(vec![id]),
+            harness.root.join("elsewhere"),
+            &["r0-root"],
+        );
         harness.press(KeyCode::Down);
         harness.press(KeyCode::Enter);
 
         assert_eq!(harness.controller.row_count(), 3);
     }
 
-    /// No candidate and the store already named by the one repo present:
-    /// `lines` comes back empty, and `Down` must not panic on it.
+    /// No candidate and no "new repo" is not a shape `resolve_add` produces,
+    /// but `Down` must not panic on it regardless.
     #[test]
     fn an_empty_picker_does_not_panic_on_down() {
         let mut harness = Harness::settled(1);
-        harness.press(KeyCode::Char('a'));
-        harness.type_path("/repo");
-        harness.press(KeyCode::Enter);
+        harness.controller.mode = UiState::Picker {
+            resolved: Resolved {
+                source_dir: harness.root.join("r0"),
+                identity: RepoIdentity {
+                    root_commits: vec!["r0-root".into()],
+                    git_common_dir: harness.root.join("r0/.git"),
+                    head_subdir: PathBuf::new(),
+                },
+                matched: Match::Selection(vec![]),
+            },
+            lines: vec![],
+            selected_line: 0,
+        };
 
-        harness.answer(Match::Selection(vec![]), harness.root.join("r0"));
         harness.press(KeyCode::Down);
         harness.press(KeyCode::Enter);
 
