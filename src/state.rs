@@ -1109,6 +1109,66 @@ mod tests {
         assert!(loaded.repos.iter().all(|r| r.duplicate != Duplicate::None));
     }
 
+    /// A shared store's two files, by id, marked `(Scoring, Shadowed)` in that
+    /// order.
+    fn scoring_and_shadowed(loaded: &Loaded) -> (Uuid, Uuid) {
+        let scoring = loaded
+            .repos
+            .iter()
+            .find(|r| r.duplicate == Duplicate::Scoring)
+            .expect("one scoring")
+            .id;
+        let shadowed = loaded
+            .repos
+            .iter()
+            .find(|r| r.duplicate == Duplicate::Shadowed)
+            .expect("one shadowed")
+            .id;
+        (scoring, shadowed)
+    }
+
+    #[test]
+    fn removing_the_shadowed_copy_leaves_the_scorer_undisputed() {
+        let temp = TempRoot::new();
+        let storage = temp.storage();
+        storage
+            .save(&state(&[ROOT_A], "/repo/.git"))
+            .expect("saving");
+        storage
+            .save(&state(&[ROOT_A], "/repo/.git"))
+            .expect("saving");
+        let (scoring, shadowed) = scoring_and_shadowed(&storage.load_all());
+
+        storage
+            .remove(shadowed)
+            .expect("removing the shadowed copy");
+
+        let loaded = storage.load_all();
+        assert_eq!(loaded.repos.len(), 1);
+        assert_eq!(loaded.repos[0].id, scoring);
+        assert_eq!(loaded.repos[0].duplicate, Duplicate::None);
+    }
+
+    #[test]
+    fn removing_the_scoring_copy_promotes_the_shadowed_one() {
+        let temp = TempRoot::new();
+        let storage = temp.storage();
+        storage
+            .save(&state(&[ROOT_A], "/repo/.git"))
+            .expect("saving");
+        storage
+            .save(&state(&[ROOT_A], "/repo/.git"))
+            .expect("saving");
+        let (scoring, shadowed) = scoring_and_shadowed(&storage.load_all());
+
+        storage.remove(scoring).expect("removing the scoring copy");
+
+        let loaded = storage.load_all();
+        assert_eq!(loaded.repos.len(), 1);
+        assert_eq!(loaded.repos[0].id, shadowed);
+        assert_eq!(loaded.repos[0].duplicate, Duplicate::None);
+    }
+
     #[test]
     fn a_repos_dir_that_will_not_read_is_one_error_naming_it() {
         let temp = TempRoot::new();

@@ -373,7 +373,7 @@ needs a terminal; the SIGKILL test holds the lock from a `sh` that `exec`s into 
 The quit path — `q` and handover alike — blanks `.take`, drops the handle, calls
 `ratatui::restore()`, and exits 0. An in-flight scan's findings are dropped unwritten.
 
-## 11 — Tests
+## 11 — Tests ✅
 
 Unit tests beside their modules for `reflog::extract_shas`, `parse_numstat`, `parse_patch_ids`,
 the XP arithmetic, the label rule and the relative-time formatter.

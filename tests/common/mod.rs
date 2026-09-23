@@ -55,6 +55,25 @@ impl Fixture {
         }
     }
 
+    /// `git init --separate-git-dir`: the working tree and the store it
+    /// points at live in different directories, isolated the same way
+    /// `repo()` is.
+    pub fn separate_git_dir_repo(&self, name: &str, git_dir_name: &str) -> Repo {
+        let dir = self.root.join(name);
+        fs::create_dir_all(&dir).expect("creating the repo dir");
+        let repo = self.attach(dir);
+        let git_dir = self.root.join(git_dir_name);
+        repo.run(&[
+            "init",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            git_dir.to_str().expect("a utf-8 temp path"),
+        ]);
+        repo.isolate();
+        repo
+    }
+
     /// `git clone` from `source`, isolated the same way `repo()` is.
     pub fn clone_of(&self, source: &Repo, name: &str) -> Repo {
         let dir = self.root.join(name);

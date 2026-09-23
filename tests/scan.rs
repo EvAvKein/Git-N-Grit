@@ -459,6 +459,78 @@ fn what_was_awarded_sums_to_the_total() {
 }
 
 #[test]
+fn deleting_a_linked_worktrees_directory_leaves_the_repo_scoring_from_the_rest() {
+    let fx = Fixture::new();
+    let repo = fx.repo("work");
+    repo.commit_file("a.txt", "one\n", "first");
+    let mut state = repo.state();
+    let earned = scan(&mut state);
+
+    let path = fx.path("feature");
+    repo.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "feature",
+        path.to_str().expect("a utf-8 temp path"),
+    ]);
+    let feature = fx.attach(path.clone());
+    state.adopt(&feature.identity(), &path);
+    feature.commit_file("b.txt", "two\n", "branch work");
+    let branch = scan(&mut state);
+
+    // The checkout is gone; the git dir under the common dir — and so its
+    // reflog — is left behind. `git worktree list` calls this *prunable*.
+    fs::remove_dir_all(&path).expect("deleting the linked worktree's checkout");
+
+    // Nothing errors over the missing checkout, and the repo goes on scoring
+    // from the worktree that is still there.
+    assert_eq!(scan(&mut state), 0);
+    repo.commit_file("c.txt", "three\n", "main work");
+    assert_eq!(scan(&mut state), 1);
+    assert_eq!(state.total_xp, earned + branch + 1);
+}
+
+#[test]
+fn a_separate_git_dirs_working_tree_can_be_deleted_and_still_scores() {
+    let fx = Fixture::new();
+    let repo = fx.separate_git_dir_repo("work", "work.git");
+    repo.commit_file("a.txt", "one\n", "first");
+    let mut state = repo.state();
+    let earned = scan(&mut state);
+    let parent = repo.head();
+
+    fs::remove_dir_all(&repo.dir).expect("deleting the working tree");
+    let store = fx.attach(fx.path("work.git"));
+
+    // No working tree left to `git add` into, so the second commit is built
+    // with plumbing straight against the store.
+    let blob_path = fx.path("blob.txt");
+    fs::write(&blob_path, "two\nthree\n").expect("writing a blob");
+    let blob = store.run(&[
+        "hash-object",
+        "-w",
+        blob_path.to_str().expect("a utf-8 temp path"),
+    ]);
+    store.run(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "100644",
+        &blob,
+        "b.txt",
+    ]);
+    let tree = store.run(&["write-tree"]);
+    let commit = store.run(&["commit-tree", &tree, "-p", &parent, "-m", "second"]);
+    store.run(&["update-ref", "-m", "commit: second", "HEAD", &commit]);
+
+    // `scan_dir` falls back to the store once no live worktree's files are
+    // there, rather than failing outright on the one that is gone.
+    assert_eq!(scan(&mut state), 2);
+    assert_eq!(state.total_xp, earned + 2);
+}
+
+#[test]
 fn a_binary_file_counts_zero_and_text_beside_it_still_counts() {
     let fx = Fixture::new();
     let repo = fx.repo("work");
