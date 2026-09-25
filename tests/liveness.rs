@@ -299,6 +299,56 @@ fn a_same_parent_mv_is_followed_without_ever_dimming() {
     });
 }
 
+/// A settled row generates nothing further on its own — a regression check
+/// against a scan/relocate pair that keeps re-triggering each other. That
+/// shape can hold a state file's total and inactive reason both correct
+/// while still burning CPU re-saving it forever, which neither of them alone
+/// would catch.
+#[test]
+fn a_settled_same_parent_mv_goes_quiet() {
+    let fx = Fixture::new();
+    let store = storage(&fx);
+    let original = fx.repo("work");
+    original.commit_file("a.txt", "one\ntwo\n", "first"); // xp 2
+
+    let mut h = Harness::new(store);
+    let id = h.add(&original.dir);
+    h.wait_until(Duration::from_secs(5), |c| {
+        c.state(id).is_some_and(|s| s.total_xp == 2)
+    });
+
+    let renamed = fx.path("work-renamed");
+    fs::rename(&original.dir, &renamed).expect("renaming it in place");
+    h.wait_until(Duration::from_secs(5), |c| {
+        c.state(id)
+            .is_some_and(|s| s.worktrees[0].source_dir == renamed)
+            && c.inactive_reason(id).is_none()
+    });
+
+    // The relocate's own reconciling rescan can still be in flight once the
+    // condition above first holds — give it a moment to land before treating
+    // anything further as unexpected.
+    let grace = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < grace {
+        if let Ok(event) = h.rx.recv_timeout(Duration::from_millis(50)) {
+            h.controller.handle(event).expect("handling an event");
+        }
+    }
+
+    let mut unexpected = Vec::new();
+    let quiet_until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < quiet_until {
+        if let Ok(event) = h.rx.recv_timeout(Duration::from_millis(100)) {
+            unexpected.push(format!("{event:?}"));
+            h.controller.handle(event).expect("handling an event");
+        }
+    }
+    assert!(
+        unexpected.is_empty(),
+        "a settled row kept generating events instead of going quiet: {unexpected:?}"
+    );
+}
+
 #[test]
 fn a_cross_parent_mv_dims_without_a_keypress() {
     let fx = Fixture::new();
@@ -321,4 +371,37 @@ fn a_cross_parent_mv_dims_without_a_keypress() {
         c.inactive_reason(id) == Some(InactiveReason::Moved)
     });
     assert_eq!(h.total(id), 2);
+}
+
+#[test]
+fn a_cross_parent_mv_recovers_on_its_own_when_moved_back() {
+    let fx = Fixture::new();
+    let store = storage(&fx);
+    let original = fx.repo("work");
+    original.commit_file("a.txt", "one\ntwo\n", "first"); // xp 2
+
+    let mut h = Harness::new(store);
+    let id = h.add(&original.dir);
+    h.wait_until(Duration::from_secs(5), |c| {
+        c.state(id).is_some_and(|s| s.total_xp == 2)
+    });
+
+    let dest = elsewhere(&fx);
+    fs::rename(&original.dir, &dest).expect("moving it out from under its parent");
+    let moved = fx.attach(dest);
+
+    // No `r`: the parent watch notices it left.
+    h.wait_until(Duration::from_secs(5), |c| {
+        c.inactive_reason(id) == Some(InactiveReason::Moved)
+    });
+
+    // Work done while the row is stale — the watch was dropped along with it.
+    moved.commit_file("b.txt", "three\nfour\nfive\n", "while gone"); // xp 3
+    fs::rename(&moved.dir, fx.path("work")).expect("moving it back to its original path");
+
+    // No `r` here either: the ticker's own probe of the *original* path is
+    // what notices the return, the same recovery a stale row reached by `r`
+    // already gets.
+    h.wait_until(Duration::from_secs(5), |c| c.inactive_reason(id).is_none());
+    assert_eq!(h.total(id), 5);
 }
