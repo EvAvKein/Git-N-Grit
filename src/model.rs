@@ -7,6 +7,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::mem;
@@ -19,6 +20,7 @@ use notify::{EventHandler, RecommendedWatcher, RecursiveMode, Watcher, recommend
 use uuid::Uuid;
 
 use crate::event::AppEvent;
+use crate::git::RepoIdentity;
 use crate::scan::{self, Job, Resolved, ScanFindings, Worker};
 use crate::stale::{Probe, Ticker};
 use crate::state::{
@@ -30,6 +32,18 @@ pub const WEDGE_LIMIT: Duration = Duration::from_secs(10);
 
 /// How often a store that has gone missing is stat-ed for its return.
 const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// One directory `notify` watches, and why.
+pub enum WatchEntry {
+    /// Reacts to a `HEAD` write under this directory — the reflog watch every
+    /// live worktree has always had.
+    Reflog(HashSet<Uuid>),
+    /// Reacts to a change of a tracked child by name — a live worktree's own
+    /// directory, watched from its parent so a rename of it is seen at all.
+    /// Keyed by the child's current basename: two worktrees can't share one
+    /// name under the same parent at once, so this is a safe, direct lookup.
+    Parent(HashMap<OsString, Uuid>),
+}
 
 /// Why a repo is earning nothing right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +117,14 @@ struct Scanner {
     incarnation: u64,
     jobs: Sender<Job>,
     scans: HashMap<Uuid, ScanOutdated>,
+    /// Relocates posted with no answer back yet — one that failed still
+    /// answers. Never read for its value, only for whether it is zero, the
+    /// same shape as `unresolved_paths` and for the same reason: a
+    /// same-parent rename delivers its lone "from" before the correlated pair
+    /// that resolves it (below), so more than one can be out for the same
+    /// repo, each spawning its own subprocess and touching nothing shared
+    /// until its own result lands.
+    relocating: usize,
     /// Paths posted with no answer back yet — one that failed still answers.
     /// Never read for its value, only for whether it is zero.
     unresolved_paths: usize,
@@ -116,13 +138,14 @@ impl Scanner {
             incarnation: 0,
             jobs,
             scans: HashMap::new(),
+            relocating: 0,
             unresolved_paths: 0,
         }
     }
 
     /// Nothing posted and unanswered, so no thread can be inside a call.
     fn idle(&self) -> bool {
-        self.scans.is_empty() && self.unresolved_paths == 0
+        self.scans.is_empty() && self.relocating == 0 && self.unresolved_paths == 0
     }
 
     /// Post a scan, or record that the one already out has been overtaken. Its
@@ -147,6 +170,17 @@ impl Scanner {
         self.scans.remove(&id) == Some(ScanOutdated::True)
     }
 
+    fn relocate(&mut self, id: Uuid, new_source_dir: PathBuf) {
+        self.relocating += 1;
+        let _ = self.jobs.send(Job::Relocate { id, new_source_dir });
+    }
+
+    /// Answered, whether or not it is still the freshest answer for this
+    /// repo — `on_relocated` is what tells a stale one from a current one.
+    fn relocated(&mut self) {
+        self.relocating = self.relocating.saturating_sub(1);
+    }
+
     fn resolve(&mut self, seq: u64, path: PathBuf, states: Vec<RepoState>) {
         self.unresolved_paths += 1;
         let _ = self.jobs.send(Job::Resolve { seq, path, states });
@@ -169,6 +203,7 @@ impl Scanner {
         self.jobs = jobs;
         mem::replace(&mut self.worker, worker).abandon();
         self.unresolved_paths = 0;
+        self.relocating = 0;
         self.scans.drain().map(|(id, _)| id).collect()
     }
 }
@@ -181,7 +216,7 @@ pub struct Model {
     bad_files: Vec<LoadError>,
 
     watcher: RecommendedWatcher,
-    watches: HashMap<PathBuf, HashSet<Uuid>>,
+    watches: HashMap<PathBuf, WatchEntry>,
 
     /// Paths no thread may touch again, because one is still inside a call on
     /// this one and always will be.
@@ -251,7 +286,7 @@ impl Model {
         &self.bad_files
     }
 
-    pub fn watches(&self) -> &HashMap<PathBuf, HashSet<Uuid>> {
+    pub fn watches(&self) -> &HashMap<PathBuf, WatchEntry> {
         &self.watches
     }
 
@@ -446,6 +481,35 @@ impl Model {
         }
     }
 
+    /// A worktree's new location resolved. `Ok` adopts it, the same call a
+    /// manual re-add makes — no `match_identity`, since a same-parent rename
+    /// preserves the inode: which repo this is was never in question. Either
+    /// way a rescan follows, to bank anything scored during the move and (on
+    /// `Err`, the path having moved again before this resolved) fall back to
+    /// the plain "gone" path staleness already answers.
+    pub(crate) fn on_relocated(
+        &mut self,
+        incarnation: u64,
+        id: Uuid,
+        new_source_dir: PathBuf,
+        result: Result<RepoIdentity>,
+    ) {
+        if incarnation != self.scanner.incarnation {
+            return;
+        }
+        self.scanner.relocated();
+        let Some(i) = self.repos.iter().position(|s| s.id == id) else {
+            return; // removed while the job was out
+        };
+        if let Ok(identity) = result {
+            if let Err(e) = self.storage.adopt(&mut self.repos[i], &identity, &new_source_dir) {
+                self.fail(id, format!("state file would not write: {e:#}"));
+            }
+            self.refresh_parent_watches(id);
+        }
+        self.queue_scan(id);
+    }
+
     fn bank(&mut self, id: Uuid, findings: ScanFindings) {
         let Some(i) = self.repos.iter().position(|s| s.id == id) else {
             return;
@@ -506,23 +570,51 @@ impl Model {
     // ---- watches and probes -----------------------------------------------
 
     /// A takeover file appearing is the caller's signal to quit; everything
-    /// else here just decides which repo to queue.
+    /// else here just decides which repo to queue or relocate.
+    ///
+    /// A `notify::Event`'s paths arrive together in one call, one call per
+    /// event: a rename `notify` could correlate carries both the old and new
+    /// path, still paired, which is what lets a same-parent rename be told
+    /// from a plain one-path change (a write, a delete, a move to elsewhere).
     pub(crate) fn on_fs(&mut self, paths: Vec<PathBuf>) -> bool {
+        if paths.iter().any(|p| self.is_takeover(p)) {
+            return true;
+        }
+
+        // Matched against `worktrees` directly, not the watch table: the lone
+        // "from" half of this same rename typically lands first (below) and
+        // can mark the row stale before this, its correlated pair, arrives —
+        // dropping the watch table's own entry along with it. A repo's
+        // recorded path outlives that, so this still finds it and, once the
+        // relocate lands, the rescan it queues clears the staleness again.
+        if let [old, new] = paths.as_slice()
+            && let Some(id) = self
+                .repos
+                .iter()
+                .find(|s| s.worktrees.iter().any(|w| &w.source_dir == old))
+                .map(|s| s.id)
+        {
+            self.relocate(id, new.clone());
+            return false;
+        }
+
         let mut touched = HashSet::new();
-        for path in paths {
-            if self.is_takeover(&path) {
-                return true;
-            }
-            // `logs` for the git-dir fallback, where the first commit creates
-            // that directory. `HEAD.lock` passes neither.
+        for path in &paths {
             let Some(name) = path.file_name() else {
                 continue;
             };
-            if name != "HEAD" && name != "logs" {
-                continue;
-            }
-            if let Some(owners) = path.parent().and_then(|dir| self.watches.get(dir)) {
-                touched.extend(owners.iter().copied());
+            match path.parent().and_then(|dir| self.watches.get(dir)) {
+                // `logs` for the git-dir fallback, where the first commit
+                // creates that directory. `HEAD.lock` passes neither.
+                Some(WatchEntry::Reflog(owners)) if name == "HEAD" || name == "logs" => {
+                    touched.extend(owners.iter().copied());
+                }
+                Some(WatchEntry::Parent(names)) => {
+                    if let Some(&id) = names.get(name) {
+                        touched.insert(id);
+                    }
+                }
+                _ => {}
             }
         }
         for id in touched {
@@ -538,27 +630,80 @@ impl Model {
             && self.storage.takeover_path().exists()
     }
 
-    fn set_watches(&mut self, id: Uuid, dirs: &[PathBuf]) {
-        self.unwatch_repo_except(id, dirs);
-        for dir in dirs {
-            let owners = self.watches.entry(dir.clone()).or_default();
-            owners.insert(id);
-            if owners.len() == 1 {
+    /// Post the worker a fresh identity resolve for a worktree's new location,
+    /// so `on_relocated` can adopt it the way a manual re-add would.
+    fn relocate(&mut self, id: Uuid, new_source_dir: PathBuf) {
+        self.scanner.relocate(id, new_source_dir);
+    }
+
+    /// Bring both watch kinds for this repo in line with its current state:
+    /// `reflog_dirs` from the scan that just resolved them — deciding `logs`
+    /// against the git-dir fallback is a `stat`, still the worker's answer —
+    /// and the parent-of-each-worktree dirs, recomputed here since they're
+    /// pure path arithmetic on `worktrees` and need no `stat` at all.
+    fn set_watches(&mut self, id: Uuid, reflog_dirs: &[PathBuf]) {
+        self.unwatch_reflog(id);
+        for dir in reflog_dirs {
+            let is_new = !self.watches.contains_key(dir);
+            if let WatchEntry::Reflog(owners) = self
+                .watches
+                .entry(dir.clone())
+                .or_insert_with(|| WatchEntry::Reflog(HashSet::new()))
+            {
+                owners.insert(id);
+            }
+            if is_new {
                 let _ = self.watcher.watch(dir, RecursiveMode::NonRecursive);
+            }
+        }
+        self.refresh_parent_watches(id);
+    }
+
+    /// Re-register a repo's parent watches against its current `worktrees`.
+    /// Registered for every entry, live or not — `watch()` on a directory
+    /// that isn't there just fails, the same tolerance the reflog watch's
+    /// git-dir fallback already relies on.
+    fn refresh_parent_watches(&mut self, id: Uuid) {
+        self.unwatch_parent(id);
+        let Some(state) = self.state(id) else {
+            return;
+        };
+        let targets: Vec<(PathBuf, OsString)> = state
+            .worktrees
+            .iter()
+            .filter_map(|w| {
+                let dir = w.source_dir.parent()?.to_path_buf();
+                let name = w.source_dir.file_name()?.to_os_string();
+                Some((dir, name))
+            })
+            .collect();
+
+        for (dir, name) in targets {
+            let is_new = !self.watches.contains_key(&dir);
+            if let WatchEntry::Parent(names) = self
+                .watches
+                .entry(dir.clone())
+                .or_insert_with(|| WatchEntry::Parent(HashMap::new()))
+            {
+                names.insert(name, id);
+            }
+            if is_new {
+                let _ = self.watcher.watch(&dir, RecursiveMode::NonRecursive);
             }
         }
     }
 
     fn unwatch_repo(&mut self, id: Uuid) {
-        self.unwatch_repo_except(id, &[]);
+        self.unwatch_reflog(id);
+        self.unwatch_parent(id);
     }
 
-    fn unwatch_repo_except(&mut self, id: Uuid, keep: &[PathBuf]) {
+    fn unwatch_reflog(&mut self, id: Uuid) {
         let mut orphaned = Vec::new();
-        self.watches.retain(|dir, owners| {
-            if keep.contains(dir) {
+        self.watches.retain(|dir, entry| {
+            let WatchEntry::Reflog(owners) = entry else {
                 return true;
-            }
+            };
             owners.remove(&id);
             if owners.is_empty() {
                 orphaned.push(dir.clone());
@@ -569,6 +714,24 @@ impl Model {
         for dir in orphaned {
             // A path that is already gone answers with an error, which is the
             // state we were asking for.
+            let _ = self.watcher.unwatch(&dir);
+        }
+    }
+
+    fn unwatch_parent(&mut self, id: Uuid) {
+        let mut orphaned = Vec::new();
+        self.watches.retain(|dir, entry| {
+            let WatchEntry::Parent(names) = entry else {
+                return true;
+            };
+            names.retain(|_, owner| *owner != id);
+            if names.is_empty() {
+                orphaned.push(dir.clone());
+                return false;
+            }
+            true
+        });
+        for dir in orphaned {
             let _ = self.watcher.unwatch(&dir);
         }
     }
@@ -645,6 +808,11 @@ impl Model {
     /// Resolves posted with no answer back yet.
     pub(crate) fn unresolved_paths(&self) -> usize {
         self.scanner.unresolved_paths
+    }
+
+    /// Relocates posted with no answer back yet.
+    pub(crate) fn relocating(&self) -> usize {
+        self.scanner.relocating
     }
 }
 
@@ -739,6 +907,17 @@ mod tests {
         fn saved(&self, id: Uuid) -> Vec<u8> {
             let path = self.root.join("repos").join(format!("{id}.json"));
             fs::read(path).expect("reading a state file")
+        }
+
+        /// The directories watched for a `HEAD` write — every repo here also
+        /// gets a parent watch, which most of these tests aren't about.
+        fn reflog_watches(&self) -> Vec<PathBuf> {
+            self.model
+                .watches
+                .iter()
+                .filter(|(_, entry)| matches!(entry, WatchEntry::Reflog(_)))
+                .map(|(dir, _)| dir.clone())
+                .collect()
         }
     }
 
@@ -1085,6 +1264,78 @@ mod tests {
     }
 
     #[test]
+    fn a_same_parent_rename_dispatches_a_relocate() {
+        let mut harness = Harness::settled(1);
+        let old = harness.root.join("r0");
+        let new = harness.root.join("r0-renamed");
+
+        harness.model.on_fs(vec![old, new]);
+
+        assert_eq!(harness.model.relocating(), 1);
+    }
+
+    #[test]
+    fn an_unrelated_rename_beside_a_parent_watch_scans_nothing() {
+        let mut harness = Harness::settled(1);
+        let old = harness.root.join("someone-elses-dir");
+        let new = harness.root.join("someone-elses-dir-renamed");
+
+        harness.model.on_fs(vec![old, new]);
+
+        assert!(harness.model.scanner.scans.is_empty());
+    }
+
+    #[test]
+    fn a_lone_departure_under_a_parent_watch_queues_a_rescan() {
+        let mut harness = Harness::settled(1);
+        let id = harness.id(0);
+
+        harness.model.on_fs(vec![harness.root.join("r0")]);
+
+        assert!(harness.scanning(id));
+    }
+
+    #[test]
+    fn a_relocate_adopts_the_new_path_and_queues_a_rescan() {
+        let mut harness = Harness::settled(1);
+        let id = harness.id(0);
+        let new_dir = harness.root.join("r0-renamed");
+        let identity = RepoIdentity {
+            root_commits: vec!["r0-root".into()],
+            git_common_dir: new_dir.join(".git"),
+            head_subdir: PathBuf::new(),
+        };
+        let incarnation = harness.model.scanner.incarnation;
+
+        harness
+            .model
+            .on_relocated(incarnation, id, new_dir.clone(), Ok(identity));
+
+        let state = harness.model.state(id).expect("the repo");
+        assert_eq!(state.git_common_dir, new_dir.join(".git"));
+        assert_eq!(state.worktrees[0].source_dir, new_dir);
+        assert!(!state.stale); // never dipped stale for a resolved relocate
+        assert!(harness.scanning(id)); // the reconciling rescan is out
+    }
+
+    #[test]
+    fn a_relocate_that_fails_falls_back_to_a_rescan_without_failing_the_row() {
+        let mut harness = Harness::settled(1);
+        let id = harness.id(0);
+        let incarnation = harness.model.scanner.incarnation;
+
+        harness.model.on_relocated(
+            incarnation,
+            id,
+            harness.root.join("wherever-it-went-next"),
+            Err(anyhow::anyhow!("moved again before this resolved")),
+        );
+
+        assert!(harness.model.state(id).expect("the repo").error.is_none());
+        assert!(harness.scanning(id));
+    }
+
+    #[test]
     fn findings_replace_the_watches_the_ones_before_them_named() {
         let mut harness = Harness::settled(1);
         let id = harness.id(0);
@@ -1109,10 +1360,7 @@ mod tests {
             },
         );
 
-        assert_eq!(
-            harness.model.watches.keys().collect::<Vec<_>>(),
-            vec![&second]
-        );
+        assert_eq!(harness.reflog_watches(), vec![second]);
     }
 
     /// The one test that uses `notify` for real: everything above hands the app
@@ -1140,6 +1388,29 @@ mod tests {
                 Ok(AppEvent::Fs(paths)) if paths.iter().any(|p| p.ends_with("HEAD")) => break,
                 Ok(_) => continue,
                 Err(e) => panic!("no event for the reflog write: {e}"),
+            }
+        }
+    }
+
+    /// A second use of a real `notify` watcher: a same-parent rename arrives
+    /// as one event carrying both paths, which is what lets `on_fs` follow it
+    /// instead of only noticing it left.
+    #[test]
+    fn a_same_parent_rename_is_delivered_as_a_correlated_pair() {
+        let harness = Harness::settled(1);
+        let old = harness.root.join("r0");
+        let new = harness.root.join("r0-renamed");
+        fs::create_dir_all(&old).expect("creating the worktree dir");
+
+        fs::rename(&old, &new).expect("renaming it in place");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match harness.inbox.recv_timeout(left) {
+                Ok(AppEvent::Fs(paths)) if paths.as_slice() == [old.clone(), new.clone()] => break,
+                Ok(_) => continue,
+                Err(e) => panic!("no correlated rename event: {e}"),
             }
         }
     }

@@ -5,7 +5,7 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,16 @@ fn storage(fixture: &Fixture) -> Storage {
     let storage = Storage::new(fixture.path("storage"));
     fs::create_dir_all(storage.root()).expect("creating the storage root");
     storage
+}
+
+/// A path under a parent distinct from every other path this fixture hands
+/// out, so moving something here is never mistaken for a same-parent rename —
+/// the tests that mean "moved to an unknown location, discovered only by `r`
+/// or the ticker" need a destination the parent watch cannot auto-follow.
+fn elsewhere(fixture: &Fixture) -> PathBuf {
+    let dir = fixture.path("elsewhere");
+    fs::create_dir_all(&dir).expect("creating a different parent");
+    dir.join("work")
 }
 
 /// A real `Controller` — its watcher, ticker and scan worker all running as
@@ -128,9 +138,9 @@ fn once_stale_it_recovers_on_its_own_and_scores_what_happened_while_gone() {
         c.state(id).is_some_and(|s| s.total_xp == 2)
     });
 
-    let elsewhere = fx.path("elsewhere");
-    fs::rename(&original.dir, &elsewhere).expect("moving the repo away");
-    let moved = fx.attach(elsewhere);
+    let dest = elsewhere(&fx);
+    fs::rename(&original.dir, &dest).expect("moving the repo away");
+    let moved = fx.attach(dest);
     h.press(KeyCode::Char('r'));
     h.wait_until(Duration::from_secs(5), |c| {
         c.inactive_reason(id) == Some(InactiveReason::Moved)
@@ -159,9 +169,9 @@ fn returning_on_r_re_registers_the_watch_not_just_the_marker() {
         c.state(id).is_some_and(|s| s.total_xp == 2)
     });
 
-    let elsewhere = fx.path("elsewhere");
-    fs::rename(&original.dir, &elsewhere).expect("moving it away");
-    let moved = fx.attach(elsewhere);
+    let dest = elsewhere(&fx);
+    fs::rename(&original.dir, &dest).expect("moving it away");
+    let moved = fx.attach(dest);
     h.press(KeyCode::Char('r'));
     h.wait_until(Duration::from_secs(5), |c| {
         c.inactive_reason(id) == Some(InactiveReason::Moved)
@@ -195,7 +205,7 @@ fn a_different_repo_at_a_stale_path_is_foreign_and_inherits_nothing() {
         c.state(id).is_some_and(|s| s.total_xp == 2)
     });
 
-    fs::rename(&original.dir, fx.path("elsewhere")).expect("moving it away");
+    fs::rename(&original.dir, elsewhere(&fx)).expect("moving it away");
     h.press(KeyCode::Char('r'));
     h.wait_until(Duration::from_secs(5), |c| {
         c.inactive_reason(id) == Some(InactiveReason::Moved)
@@ -224,9 +234,9 @@ fn a_clone_in_flight_does_not_unstale_but_the_same_upstream_does_once_written() 
         c.state(id).is_some_and(|s| s.total_xp == 2)
     });
 
-    let elsewhere = fx.path("elsewhere");
-    fs::rename(&original.dir, &elsewhere).expect("moving it away");
-    let backup = fx.attach(elsewhere);
+    let dest = elsewhere(&fx);
+    fs::rename(&original.dir, &dest).expect("moving it away");
+    let backup = fx.attach(dest);
     h.press(KeyCode::Char('r'));
     h.wait_until(Duration::from_secs(5), |c| {
         c.inactive_reason(id) == Some(InactiveReason::Moved)
@@ -250,5 +260,65 @@ fn a_clone_in_flight_does_not_unstale_but_the_same_upstream_does_once_written() 
     fx.clone_of(&backup, "work");
 
     h.wait_until(Duration::from_secs(5), |c| c.inactive_reason(id).is_none());
+    assert_eq!(h.total(id), 2);
+}
+
+#[test]
+fn a_same_parent_mv_is_followed_without_ever_dimming() {
+    let fx = Fixture::new();
+    let store = storage(&fx);
+    let original = fx.repo("work");
+    original.commit_file("a.txt", "one\ntwo\n", "first"); // xp 2
+
+    let mut h = Harness::new(store);
+    let id = h.add(&original.dir);
+    h.wait_until(Duration::from_secs(5), |c| {
+        c.state(id).is_some_and(|s| s.total_xp == 2)
+    });
+
+    let renamed = fx.path("work-renamed");
+    fs::rename(&original.dir, &renamed).expect("renaming it in place");
+
+    // No `r`: the parent watch catches the correlated rename and follows it.
+    // The lone "from" half of the same rename typically lands first and can
+    // mark the row stale for a moment before the relocate's own rescan
+    // settles it again — both conditions are waited for together rather than
+    // asserted right after the path updates.
+    h.wait_until(Duration::from_secs(5), |c| {
+        c.state(id)
+            .is_some_and(|s| s.worktrees[0].source_dir == renamed)
+            && c.inactive_reason(id).is_none()
+    });
+
+    // A commit made at the new path, live, with no further key: the reflog
+    // watch was re-registered there too, not just the label.
+    let moved = fx.attach(renamed);
+    moved.commit_file("b.txt", "three\n", "after the mv"); // xp 1
+    h.wait_until(Duration::from_secs(5), |c| {
+        c.state(id).is_some_and(|s| s.total_xp == 3)
+    });
+}
+
+#[test]
+fn a_cross_parent_mv_dims_without_a_keypress() {
+    let fx = Fixture::new();
+    let store = storage(&fx);
+    let original = fx.repo("work");
+    original.commit_file("a.txt", "one\ntwo\n", "first"); // xp 2
+
+    let mut h = Harness::new(store);
+    let id = h.add(&original.dir);
+    h.wait_until(Duration::from_secs(5), |c| {
+        c.state(id).is_some_and(|s| s.total_xp == 2)
+    });
+
+    fs::create_dir_all(fx.path("elsewhere")).expect("creating a different parent");
+    fs::rename(&original.dir, fx.path("elsewhere/work")).expect("moving it out from under its parent");
+
+    // No `r`: the parent watch notices it left, even with no known
+    // destination, instead of waiting for a manual refresh to find out.
+    h.wait_until(Duration::from_secs(5), |c| {
+        c.inactive_reason(id) == Some(InactiveReason::Moved)
+    });
     assert_eq!(h.total(id), 2);
 }

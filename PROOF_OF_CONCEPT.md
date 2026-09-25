@@ -558,6 +558,23 @@ A write triggers a rescan of that repo and a redraw — commit in another pane a
 its own. One commit fires around three events (open, modify, close), so drain the channel into a
 set of dirty repos and queue each once.
 
+**A moved worktree.** The `logs` watch is a descendant of the worktree's own directory, and an
+inotify watch is bound to the inode it names, not to the path it was given — renaming an ancestor of
+a watched directory delivers nothing to that watch. A worktree that is `mv`'d away is invisible to its
+own reflog watch, so each live worktree also gets a second watch, on its directory's *parent*,
+matched to that worktree's current basename among whatever else is in the same parent.
+
+A rename's source path always arrives on its own first; a destination in the same parent then follows,
+paired with the source in one event. The source alone queues an ordinary rescan, whose first step is
+the stale check already described, so the row dims on the spot rather than waiting for the next `r`
+or restart. The paired event, once it lands, re-resolves identity at the destination and adopts it —
+the same call a manual re-add onto an existing row makes — clearing the dim without `r`. A rename
+within the same parent settles this way in two steps, the dim only ever momentary.
+
+A move to a different parent delivers just the source path, with nothing to say where it went; the
+dim from that first step is the answer, and recovery is the stale-repo path above — the probe
+watches the *original* location, so only a return to that exact path un-stales it on its own.
+
 Input, file events, finished scans and returning stores funnel into a single `std::sync::mpsc`
 channel, so the main thread waits in one place:
 
@@ -794,8 +811,11 @@ And on state, identity and storage:
 - `rebase --root` a registered repo, then commit — the commits score nowhere and the total is kept,
   the row saying the history was rewritten rather than that a different repo is there; adding it
   again takes the picker's existing row and it earns from the new history
-- `mv` it away and back with nothing else happening — it un-stales on its own within a couple of
-  seconds and scores a commit made while it was gone
+- `mv` it to a new name in the same directory, with nothing else happening — the row follows it with
+  no dim, and scores a commit made there afterward
+- `mv` it away to a different directory and back to its *original* path, with nothing else
+  happening — it dims on its own, then un-stales on its own within a couple of seconds and scores a
+  commit made while it was gone
 - a `git clone` in flight into the path a stale repo left does not un-stale that row; a clone of the
   same upstream there does, once its refs are written
 - delete a linked worktree's directory by hand — the repo stays live, keeps scoring from its other

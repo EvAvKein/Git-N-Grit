@@ -130,6 +130,14 @@ impl Controller {
                 }
             }
             AppEvent::Resolved { seq, result } => self.on_resolved(seq, result),
+            AppEvent::Relocated {
+                incarnation,
+                id,
+                new_source_dir,
+                result,
+            } => self
+                .model
+                .on_relocated(incarnation, id, new_source_dir, result),
         }
         Ok(())
     }
@@ -487,6 +495,7 @@ mod tests {
     use std::sync::mpsc;
 
     use crate::git::RepoIdentity;
+    use crate::model::WatchEntry;
     use crate::scan::ScanFindings;
     use crate::state::{LoadError, Match, Ownership};
 
@@ -688,7 +697,15 @@ mod tests {
                 .expect("re-reading the kept state file"),
             untouched
         );
-        assert!(harness.controller.model.watches().is_empty());
+        // `kept`'s own parent watch survives; only `doomed`'s traces are gone.
+        let watches = harness.controller.model.watches();
+        assert_eq!(watches.len(), 1);
+        match watches.values().next().expect("kept's parent watch") {
+            WatchEntry::Parent(names) => {
+                assert_eq!(names.values().copied().collect::<Vec<_>>(), vec![kept]);
+            }
+            WatchEntry::Reflog(_) => panic!("expected a parent watch"),
+        }
     }
 
     #[test]

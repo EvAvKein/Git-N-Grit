@@ -29,6 +29,12 @@ Checked against git 2.47.3 and rustc 1.98.0:
   at once, so there is no lost wakeup to guard against.
 - A `stat` blocked on a dead mount takes no signal and reaches no cancellation point, so a thread in
   it cannot be ended — only outlived.
+- An inotify watch is bound to the inode it names. Renaming an ancestor of a watched directory —
+  one level up, sideways, anywhere on the same filesystem — delivers nothing to that watch.
+- `notify` 8.2 delivers a same-parent rename as three separate events on the parent's own watch: a
+  `Modify(Name(From))` naming the old path, then a `Modify(Name(To))` naming the new one, then a
+  `Modify(Name(Both))` carrying both — the source always arriving well before the paired event.
+  A move to an unwatched parent produces only the `From`.
 
 ## Modules
 
@@ -177,7 +183,7 @@ and a limit: a real hung stat is not something a test can produce, so that path 
 ## 6 — `scan.rs` ✅
 
 The only thread that stats a path or spawns `git`. Jobs are `Scan { state: Box<RepoState>,
-verify_ownership: bool }` and `Resolve { seq, path, states }`.
+verify_ownership: bool }`, `Resolve { seq, path, states }` and `Relocate { id, new_source_dir }`.
 
 The job carries the whole state, cloned, so the worker shares nothing with the main thread and can
 call `is_stale`, `live_worktrees`, `ownership` and `scan_dir` on it — the methods stage 4 already
@@ -205,6 +211,11 @@ it, so the app re-posts every job it has no findings for. `Worker::spawn(tx, inc
 sender alongside it is what unblocks a worker waiting on an empty queue. `incarnation` is stamped on
 every scan's findings: one already sent by a worker abandoned since arrives after the app has
 re-posted its job, and would otherwise bank the same commits twice.
+
+`Relocate` answers `AppEvent::Relocated { incarnation, id, new_source_dir, result: Result<RepoIdentity> }`
+for a worktree the parent watch (stage 7) caught being renamed to `new_source_dir` — one
+`resolve_identity` call, no `match_identity`: a rename preserves the inode, so which repo this is
+is not in question the way a typed add-prompt path is.
 
 `no_email` and `ownership` are `Option`, `None` meaning the scan didn't determine it and the previous
 answer stands — without that, the `!` would clear on the first scan that found nothing new, which is
@@ -248,19 +259,35 @@ is on screen.
 ```rust
 enum InactiveReason { NotResponding, Shadowed, Undecided, Moved, Foreign, Rerooted, NoEmail, Other(String) }
 enum AddOutcome { Registered(Uuid), Pick { resolved: Resolved, candidates: Vec<Uuid>, offer_new: bool }, Failed(String) }
-struct Scanner { worker, incarnation: u64, jobs: Sender<Job>, scans: HashMap<Uuid, ScanOutdated>, unresolved_paths: usize }
+enum WatchEntry { Reflog(HashSet<Uuid>), Parent(HashMap<OsString, Uuid>) }
+struct Scanner { worker, incarnation: u64, jobs: Sender<Job>, scans: HashMap<Uuid, ScanOutdated>, relocating: usize, unresolved_paths: usize }
 ```
 
 `Model::new` loads the storage, builds one `notify::RecommendedWatcher` over the data directory
 non-recursively (which is what catches `.takeover`), spawns the worker and the ticker, and queues a
 scan for every repo. `on_fs(paths) -> bool` maps raw paths to repo ids and answers whether a
-`.takeover` file appeared — a `HEAD` or a `logs` written under a watched directory queues that
-directory's owners; `HEAD.lock` churn passes neither filter.
+`.takeover` file appeared.
+
+`watches: HashMap<PathBuf, WatchEntry>` is one table for both watch kinds a repo can hold, so nothing
+has to keep two tables in step by hand. A `Reflog` entry reacts to a `HEAD` or `logs` write, the same
+as before; a `Parent` entry — the parent of a live worktree's own directory, matched to that
+worktree's current basename among whatever else lives there — reacts to a change of that entry:
+paired with a destination, it is a same-parent rename and dispatches `Relocate`; alone, it is
+anything else that happened to it (a lone rename, a delete) and queues a rescan. `HEAD.lock` churn
+passes neither.
 
 Registration has to be re-runnable, since a repo that comes back is watched again mid-session:
-`set_watches` re-registers every directory a repo's findings named and drops any it no longer needs.
-`watch()` on a path already watched updates rather than duplicating — `inotify_add_watch` is keyed by
-path, so it should — and `unwatch()` on a path already gone answers with an error to ignore.
+`set_watches` re-registers every reflog directory a repo's findings named, drops any it no longer
+needs, and recomputes its `Parent` entries fresh from the repo's current `worktrees` — pure path
+arithmetic on data already in hand, needing no `stat` and so no trip through the worker. `watch()` on
+a path already watched updates rather than duplicating — `inotify_add_watch` is keyed by path, so it
+should — and `unwatch()` on a path already gone answers with an error to ignore.
+
+`on_relocated(incarnation, id, new_source_dir, result)` answers a `Relocate`. `Ok` adopts the new
+identity the same way a manual re-add onto an existing row does, then queues a rescan to bank
+anything scored during the move and reconcile ownership; `Err` — the path having moved again before
+this resolved — skips the adopt and queues the same rescan, which is what lets a row that briefly
+took the wrong turn settle on the truth instead of failing outright.
 
 The watcher and the ticker are opposites — one covers what exists, the other what doesn't — and a
 repo is handed from one to the other as it crosses between them. Stale repos are not watched; the
@@ -271,8 +298,11 @@ when the last one returns and wakes it on the next live → stale transition.
 answer back. `scans` holds one entry per repo with a job out, `ScanOutdated::True` where something
 asked for another while that one was out, so the repo is queued again once the findings land rather
 than racing the job that would have. `unresolved_paths` counts outstanding `Resolve`s, which have no
-repo to key them by. `may_wedge()` is `scanner.idle() && no repo stale` — true only where nothing is
-in a call that could wedge, which is what lets `Controller` block on the channel rather than poll it.
+repo to key them by; `relocating` counts outstanding `Relocate`s the same way, uncoupled from `scans`
+since a same-parent rename's lone source path (stage 6's `Relocate` doc) routinely has one of each in
+flight for the same repo at once. `may_wedge()` is `scanner.idle() && no repo stale` — true only
+where nothing is in a call that could wedge, which is what lets `Controller` block on the channel
+rather than poll it.
 `check_wedged()` abandons and replaces whichever thread is wedged past `WEDGE_LIMIT`, re-posting the
 work it lost, and returns the paths that matched no tracked repo — a typed path belongs to none, so
 the caller is left to report it wherever such a path is shown.
@@ -412,8 +442,11 @@ spawn the built binary — `env!("CARGO_BIN_EXE_gng")` — with `--storage=<that
   no keypress; check that keys stay responsive through a first scan and that the row holds its
   previous total until the findings land.
 - Start a second `gng` and take "Move it here": the first exits 0 with `.take` blanked.
-- `mv` a registered repo away and back with the app idle: the row dims, then recovers on its own with
-  no keypress.
+- `mv` a registered repo to a new name in the same directory with the app idle: the row's label
+  updates on its own with no keypress, and a commit made there afterward scores with no keypress
+  either.
+- `mv` a registered repo to a different directory with the app idle: the row dims on its own with no
+  keypress; `mv` it back to its *original* path and it recovers on its own with no further keypress.
 - Point a repo at an sshfs mount and drop the link — the row says the filesystem is not responding,
   and the UI, `q` and handover all still answer. This is the only check for the wedged-stat path.
 - Read back `~/.local/share/git-n-grit/repos/*.json` against the shape the spec gives.

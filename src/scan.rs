@@ -14,6 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use uuid::Uuid;
 
 use crate::event::AppEvent;
 use crate::git::{self, CommitInfo, RepoIdentity};
@@ -46,6 +47,10 @@ pub enum Job {
         path: PathBuf,
         states: Vec<RepoState>,
     },
+    /// Resolve identity at a worktree's new path after a same-parent rename.
+    /// No `match_identity`: a rename preserves the inode, so which repo this is
+    /// is not in question the way a typed add-prompt path is.
+    Relocate { id: Uuid, new_source_dir: PathBuf },
 }
 
 /// One SHA the scan ran through scoring, and the XP it was awarded — zero for a
@@ -154,6 +159,14 @@ fn run(shared: &Shared, incarnation: u64, jobs: &Receiver<Job>, outbox: &Sender<
             Job::Resolve { seq, path, states } => AppEvent::Resolved {
                 seq,
                 result: resolve(&path, &states, &shared.in_flight),
+            },
+            Job::Relocate { id, new_source_dir } => AppEvent::Relocated {
+                incarnation,
+                id,
+                result: watching(&shared.in_flight, &new_source_dir, || {
+                    git::resolve_identity(&new_source_dir)
+                }),
+                new_source_dir,
             },
         };
 

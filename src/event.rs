@@ -11,6 +11,7 @@ use anyhow::Result;
 use ratatui::crossterm::event::Event as CtEvent;
 use uuid::Uuid;
 
+use crate::git::RepoIdentity;
 use crate::scan::{Resolved, ScanFindings};
 
 /// Everything that can reach the main loop.
@@ -35,4 +36,14 @@ pub enum AppEvent {
     /// The add prompt's path resolved. `seq` is the prompt's generation, so an
     /// answer to a prompt that has moved on is dropped.
     Resolved { seq: u64, result: Result<Resolved> },
+    /// A tracked worktree's directory was renamed in place — the parent watch
+    /// caught both halves of the move. `Err` is the path having moved again
+    /// before this could resolve, not a failure of the row itself.
+    /// `incarnation` is the worker's, same as `ScanDone`'s.
+    Relocated {
+        incarnation: u64,
+        id: Uuid,
+        new_source_dir: PathBuf,
+        result: Result<RepoIdentity>,
+    },
 }
