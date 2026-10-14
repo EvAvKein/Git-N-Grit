@@ -12,7 +12,7 @@ use gng::event::AppEvent;
 use gng::git::local_utc_offset;
 use gng::lock::{self, Acquired, Holder, Lock};
 use gng::state::Storage;
-use gng::ui::{self, Palette, TakeoverScreen};
+use gng::view::{self, Palette, TakeoverScreen};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
@@ -111,7 +111,7 @@ fn offer_takeover(
     }
 
     let waiting = terminal
-        .draw(|frame| ui::draw_takeover(frame, &described, &TakeoverScreen::Waiting, palette));
+        .draw(|frame| view::draw_takeover(frame, &described, &TakeoverScreen::Waiting, palette));
     let taken = waiting
         .map_err(anyhow::Error::from)
         .and_then(|_| lock::take_over(storage));
@@ -138,7 +138,7 @@ fn ask_move_here(
     let mut move_here = false;
     loop {
         terminal.draw(|frame| {
-            ui::draw_takeover(
+            view::draw_takeover(
                 frame,
                 described,
                 &TakeoverScreen::Choose { move_here },
@@ -182,7 +182,7 @@ fn run_app(
 
     let mut controller = Controller::new(storage, tx)?;
     controller.run(&rx, |controller| {
-        terminal.draw(|frame| ui::draw(frame, controller, offset, palette))?;
+        terminal.draw(|frame| view::draw(frame, controller, offset, palette))?;
         Ok(())
     })
 }

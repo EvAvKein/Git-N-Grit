@@ -52,7 +52,7 @@ src/
   state.rs    RepoState, load/save, identity resolution and matching
   model.rs    domain state: repos, storage, the watcher, the wedge machinery
   controller.rs  screen state, key handling, the event loop
-  ui.rs       rendering: two panes, prompt, picker, confirm, labels, relative times
+  view.rs     rendering: two panes, prompt, picker, confirm, labels, relative times
 tests/        integration tests over throwaway git repos
 ```
 
@@ -355,7 +355,7 @@ Keys: `↑↓/jk`, `enter` (acts only on `+ Add repo…`), `a`, `d`, `r`, `q`, a
 the right pane. In the prompt every key is text, and only enter and esc leave it. Esc from the list
 does nothing. No mouse capture is enabled and no mouse events are read.
 
-## 9 — `ui.rs` ✅
+## 9 — `view.rs` ✅
 
 `Layout::horizontal` at 45/55, the left constrained to 28…40 columns. Left pane: `+ Add repo…`, then
 one row per repo with its total, `>` on the selection, scrolled to keep the selection visible, rows
@@ -396,7 +396,7 @@ unlinks it and exits non-zero.
 
 `lock::acquire` answers `Held(Lock)` or `Busy(Holder)` and errors on the unreadable case; `take_over`
 is the handover, unlinking `.takeover` on every exit. The second-instance screen is
-`ui::draw_takeover`, drawn once for the wait rather than per poll, and esc closes it as `q` does. The
+`view::draw_takeover`, drawn once for the wait rather than per poll, and esc closes it as `q` does. The
 handover tests run the real `Controller` loop in a thread with a no-op draw, since a spawned `gng`
 needs a terminal; the SIGKILL test holds the lock from a `sh` that `exec`s into `sleep`.
 

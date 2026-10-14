@@ -10,4 +10,4 @@ pub mod reflog;
 pub mod scan;
 pub mod stale;
 pub mod state;
-pub mod ui;
+pub mod view;
