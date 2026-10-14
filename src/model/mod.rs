@@ -508,7 +508,10 @@ impl Model {
             return; // removed while the job was out
         };
         if let Ok(identity) = result {
-            if let Err(e) = self.storage.adopt(&mut self.repos[i], &identity, &new_source_dir) {
+            if let Err(e) = self
+                .storage
+                .adopt(&mut self.repos[i], &identity, &new_source_dir)
+            {
                 self.fail(id, format!("state file would not write: {e:#}"));
             }
             self.refresh_parent_watches(id);

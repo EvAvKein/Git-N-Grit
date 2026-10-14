@@ -363,7 +363,8 @@ fn a_cross_parent_mv_dims_without_a_keypress() {
     });
 
     fs::create_dir_all(fx.path("elsewhere")).expect("creating a different parent");
-    fs::rename(&original.dir, fx.path("elsewhere/work")).expect("moving it out from under its parent");
+    fs::rename(&original.dir, fx.path("elsewhere/work"))
+        .expect("moving it out from under its parent");
 
     // No `r`: the parent watch notices it left, even with no known
     // destination, instead of waiting for a manual refresh to find out.
