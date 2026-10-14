@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use crate::event::AppEvent;
-use crate::probe::InFlight;
+use crate::model::event::AppEvent;
+use crate::model::scan::probe::InFlight;
 
 /// One stale store: the dir to stat, and the state file it answers for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,7 +225,8 @@ mod tests {
         ));
     }
 
-    /// The rule itself is [`crate::probe`]'s; this is the wiring to it.
+    /// The rule itself is [`crate::model::scan::probe`]'s; this is the wiring
+    /// to it.
     #[test]
     fn a_ticker_that_has_stat_ed_nothing_is_never_wedged() {
         let (outbox, _inbox) = mpsc::channel::<AppEvent>();

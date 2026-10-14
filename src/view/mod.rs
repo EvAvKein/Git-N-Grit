@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use uuid::Uuid;
 
 use crate::controller::{Controller, RepoSelection, Row, UiState};
-use crate::state::Event;
+use crate::model::storage::Event;
 
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -83,8 +83,9 @@ fn marker(selected: bool, palette: Palette) -> Span<'static> {
     }
 }
 
-/// Draw one frame. `utc_offset_secs` is [`crate::git::local_utc_offset`], read
-/// once at startup and handed down rather than called here.
+/// Draw one frame. `utc_offset_secs` is
+/// [`crate::model::git::local_utc_offset`], read once at startup and handed
+/// down rather than called here.
 pub fn draw(
     frame: &mut Frame,
     controller: &mut Controller,
@@ -574,7 +575,7 @@ pub enum TakeoverScreen {
     Waiting,
 }
 
-/// `holder` is [`crate::lock::Holder::describe`].
+/// `holder` is [`crate::model::storage::lock::Holder::describe`].
 pub fn draw_takeover(frame: &mut Frame, holder: &str, screen: &TakeoverScreen, palette: Palette) {
     let area = frame.area();
     let [main, hint] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);

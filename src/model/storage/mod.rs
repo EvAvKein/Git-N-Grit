@@ -1,5 +1,7 @@
 //! One state file per object store, and the identity match that locates one.
 
+pub mod lock;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::git::RepoIdentity;
+use crate::model::git::RepoIdentity;
 
 /// Newest events kept per repo. Display-only: `total_xp` is its own running
 /// sum, so dropping the rest costs nothing.

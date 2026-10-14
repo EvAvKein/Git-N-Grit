@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use common::{Fixture, scan};
 use gng::controller::Controller;
-use gng::lock::{self, Acquired, Lock};
-use gng::state::Storage;
+use gng::model::storage::Storage;
+use gng::model::storage::lock::{self, Acquired, Lock};
 
 fn gng(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_gng"))

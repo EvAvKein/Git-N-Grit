@@ -1,6 +1,8 @@
 //! Every subprocess.
 //! Spawning is separate from parsing so the parsers unit-test against fixture text.
 
+pub mod reflog;
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

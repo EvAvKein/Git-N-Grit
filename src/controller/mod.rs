@@ -11,10 +11,10 @@ use anyhow::Result;
 use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use uuid::Uuid;
 
-use crate::event::AppEvent;
+use crate::model::event::AppEvent;
+use crate::model::scan::Resolved;
+use crate::model::storage::{LoadError, RepoState, Storage};
 use crate::model::{AddOutcome, InactiveReason, Model};
-use crate::scan::Resolved;
-use crate::state::{LoadError, RepoState, Storage};
 
 /// A line of the left pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,10 +494,10 @@ mod tests {
     use std::fs;
     use std::sync::mpsc;
 
-    use crate::git::RepoIdentity;
     use crate::model::WatchEntry;
-    use crate::scan::ScanFindings;
-    use crate::state::{LoadError, Match, Ownership};
+    use crate::model::git::RepoIdentity;
+    use crate::model::scan::ScanFindings;
+    use crate::model::storage::{LoadError, Match, Ownership};
 
     /// A controller over a throwaway storage root, removed when the test ends.
     struct Harness {
@@ -942,7 +942,7 @@ mod tests {
             id,
             ScanFindings {
                 ownership: Some(Ownership::Ours),
-                events: vec![crate::state::Event {
+                events: vec![crate::model::storage::Event {
                     sha: "a0f0365".into(),
                     timestamp: 1756100000,
                     subject: "feat: parse reflog".into(),
@@ -951,7 +951,7 @@ mod tests {
                     xp: 1,
                     rewrite: false,
                 }],
-                new_awarded: vec![crate::scan::Awarded {
+                new_awarded: vec![crate::model::scan::Awarded {
                     sha: "a0f0365".into(),
                     xp: 1,
                 }],

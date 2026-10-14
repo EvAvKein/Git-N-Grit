@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
-use crate::state::Storage;
+use crate::model::storage::Storage;
 
 const RETRY_AFTER: Duration = Duration::from_millis(20);
 const HANDOVER_POLL: Duration = Duration::from_millis(50);

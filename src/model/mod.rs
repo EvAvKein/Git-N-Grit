@@ -2,8 +2,14 @@
 //! them live.
 //!
 //! Nothing here knows what is on screen. Liveness, `git` and every `stat` are
-//! the [worker](crate::scan)'s and the [ticker](crate::stale)'s answers,
-//! arriving as [`AppEvent`]s; this decides what they mean for a repo.
+//! the [worker](crate::model::scan)'s and the
+//! [ticker](crate::model::scan::stale)'s answers, arriving as [`AppEvent`]s;
+//! this decides what they mean for a repo.
+
+pub mod event;
+pub mod git;
+pub mod scan;
+pub mod storage;
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -19,11 +25,11 @@ use anyhow::{Context, Result};
 use notify::{EventHandler, RecommendedWatcher, RecursiveMode, Watcher, recommended_watcher};
 use uuid::Uuid;
 
-use crate::event::AppEvent;
-use crate::git::RepoIdentity;
-use crate::scan::{self, Job, Resolved, ScanFindings, Worker};
-use crate::stale::{Probe, Ticker};
-use crate::state::{
+use crate::model::event::AppEvent;
+use crate::model::git::RepoIdentity;
+use crate::model::scan::stale::{Probe, Ticker};
+use crate::model::scan::{Job, Resolved, ScanFindings, Worker};
+use crate::model::storage::{
     Duplicate, LoadError, Match, Ownership, RepoState, Storage, share_a_root_commit,
 };
 
@@ -837,9 +843,9 @@ mod tests {
     use super::*;
     use std::sync::mpsc::{self, Receiver};
 
-    use crate::git::RepoIdentity;
-    use crate::scan::Awarded;
-    use crate::state::Event;
+    use crate::model::git::RepoIdentity;
+    use crate::model::scan::Awarded;
+    use crate::model::storage::Event;
 
     /// A model over a throwaway storage root, removed when the test ends.
     struct Harness {
@@ -995,7 +1001,7 @@ mod tests {
         }
 
         let state = harness.model.state(id).expect("the repo");
-        assert_eq!(state.events.len(), crate::state::MAX_EVENTS);
+        assert_eq!(state.events.len(), crate::model::storage::MAX_EVENTS);
         assert_eq!(state.total_xp, 250);
     }
 

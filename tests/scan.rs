@@ -6,8 +6,8 @@ mod common;
 use std::fs;
 
 use common::{Fixture, MINE, THEIRS, findings, reached_git, scan, verify};
-use gng::scan::{apply, run_scan};
-use gng::state::Ownership;
+use gng::model::scan::{apply, run_scan};
+use gng::model::storage::Ownership;
 
 #[test]
 fn a_commit_scores_lines_added_plus_three_times_deleted() {

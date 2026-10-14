@@ -11,8 +11,8 @@ use anyhow::Result;
 use ratatui::crossterm::event::Event as CtEvent;
 use uuid::Uuid;
 
-use crate::git::RepoIdentity;
-use crate::scan::{Resolved, ScanFindings};
+use crate::model::git::RepoIdentity;
+use crate::model::scan::{Resolved, ScanFindings};
 
 /// Everything that can reach the main loop.
 #[derive(Debug)]

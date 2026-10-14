@@ -6,7 +6,7 @@ mod common;
 use std::fs;
 
 use common::{Added, Fixture, register_into, register_new, scan};
-use gng::state::Storage;
+use gng::model::storage::Storage;
 
 fn storage(fixture: &Fixture) -> Storage {
     let storage = Storage::new(fixture.path("storage"));

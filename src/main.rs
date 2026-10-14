@@ -8,10 +8,10 @@ use std::thread;
 
 use anyhow::{Context, Result};
 use gng::controller::Controller;
-use gng::event::AppEvent;
-use gng::git::local_utc_offset;
-use gng::lock::{self, Acquired, Holder, Lock};
-use gng::state::Storage;
+use gng::model::event::AppEvent;
+use gng::model::git::local_utc_offset;
+use gng::model::storage::Storage;
+use gng::model::storage::lock::{self, Acquired, Holder, Lock};
 use gng::view::{self, Palette, TakeoverScreen};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};

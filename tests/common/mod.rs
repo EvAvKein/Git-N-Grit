@@ -7,9 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use gng::git::resolve_identity;
-use gng::scan::{ScanFindings, apply, run_scan, run_verify};
-use gng::state::{Match, RepoState, Storage, match_identity, share_a_root_commit};
+use gng::model::git::resolve_identity;
+use gng::model::scan::{ScanFindings, apply, run_scan, run_verify};
+use gng::model::storage::{Match, RepoState, Storage, match_identity, share_a_root_commit};
 use uuid::Uuid;
 
 /// The identity every test commits under, and what each repo's local
@@ -200,7 +200,7 @@ impl Repo {
         RepoState::new(&self.identity(), &self.dir)
     }
 
-    pub fn identity(&self) -> gng::git::RepoIdentity {
+    pub fn identity(&self) -> gng::model::git::RepoIdentity {
         resolve_identity(&self.dir).expect("resolving the repo")
     }
 }

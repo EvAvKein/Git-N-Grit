@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use common::Fixture;
 use gng::controller::{Controller, UiState};
-use gng::event::AppEvent;
 use gng::model::InactiveReason;
-use gng::state::Storage;
+use gng::model::event::AppEvent;
+use gng::model::storage::Storage;
 use ratatui::crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 

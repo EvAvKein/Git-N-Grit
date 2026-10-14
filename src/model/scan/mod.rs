@@ -4,6 +4,9 @@
 //! stopped answering keeps whichever thread touched it, and the main thread is
 //! the one that has to go on drawing and answering `q`.
 
+pub mod probe;
+pub mod stale;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,11 +19,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-use crate::event::AppEvent;
-use crate::git::{self, CommitInfo, RepoIdentity};
-use crate::probe::InFlight;
-use crate::reflog;
-use crate::state::{Event, Match, Ownership, RepoState, match_identity};
+use crate::model::event::AppEvent;
+use crate::model::git::reflog;
+use crate::model::git::{self, CommitInfo, RepoIdentity};
+use crate::model::scan::probe::InFlight;
+use crate::model::storage::{Event, Match, Ownership, RepoState, match_identity};
 
 /// What a rewrite of work already paid for earns. The work counts once; the
 /// cleanup still counts a little.
