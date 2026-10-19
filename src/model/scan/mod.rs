@@ -23,7 +23,8 @@ use crate::model::event::AppEvent;
 use crate::model::git::reflog;
 use crate::model::git::{self, CommitInfo, RepoIdentity};
 use crate::model::scan::probe::InFlight;
-use crate::model::storage::{Event, Match, Ownership, RepoState, match_identity};
+use crate::model::storage::identity::{Match, match_identity};
+use crate::model::storage::repo::{Event, Ownership, RepoState};
 
 /// What a rewrite of work already paid for earns. The work counts once; the
 /// cleanup still counts a little.

@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use crate::model::event::AppEvent;
 use crate::model::scan::Resolved;
-use crate::model::storage::{LoadError, RepoState, Storage};
+use crate::model::storage::repo::RepoState;
+use crate::model::storage::{LoadError, Storage};
 use crate::model::{AddOutcome, InactiveReason, Model};
 
 /// A line of the left pane.
@@ -497,7 +498,9 @@ mod tests {
     use crate::model::WatchEntry;
     use crate::model::git::RepoIdentity;
     use crate::model::scan::ScanFindings;
-    use crate::model::storage::{LoadError, Match, Ownership};
+    use crate::model::storage::LoadError;
+    use crate::model::storage::identity::Match;
+    use crate::model::storage::repo::Ownership;
 
     /// A controller over a throwaway storage root, removed when the test ends.
     struct Harness {
@@ -942,7 +945,7 @@ mod tests {
             id,
             ScanFindings {
                 ownership: Some(Ownership::Ours),
-                events: vec![crate::model::storage::Event {
+                events: vec![crate::model::storage::repo::Event {
                     sha: "a0f0365".into(),
                     timestamp: 1756100000,
                     subject: "feat: parse reflog".into(),

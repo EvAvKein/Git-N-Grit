@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use uuid::Uuid;
 
 use crate::controller::{Controller, RepoSelection, Row, UiState};
-use crate::model::storage::Event;
+use crate::model::storage::repo::Event;
 
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",

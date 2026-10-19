@@ -9,7 +9,9 @@ use std::process::Command;
 
 use gng::model::git::resolve_identity;
 use gng::model::scan::{ScanFindings, apply, run_scan, run_verify};
-use gng::model::storage::{Match, RepoState, Storage, match_identity, share_a_root_commit};
+use gng::model::storage::Storage;
+use gng::model::storage::identity::{Match, match_identity, share_a_root_commit};
+use gng::model::storage::repo::RepoState;
 use uuid::Uuid;
 
 /// The identity every test commits under, and what each repo's local

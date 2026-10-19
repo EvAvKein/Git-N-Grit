@@ -29,9 +29,9 @@ use crate::model::event::AppEvent;
 use crate::model::git::RepoIdentity;
 use crate::model::scan::stale::{Probe, Ticker};
 use crate::model::scan::{Job, Resolved, ScanFindings, Worker};
-use crate::model::storage::{
-    Duplicate, LoadError, Match, Ownership, RepoState, Storage, share_a_root_commit,
-};
+use crate::model::storage::identity::{Match, share_a_root_commit};
+use crate::model::storage::repo::{Duplicate, Ownership, RepoState};
+use crate::model::storage::{LoadError, Storage};
 
 /// A filesystem call outstanding this long is one nothing can free.
 pub const WEDGE_LIMIT: Duration = Duration::from_secs(10);
@@ -848,7 +848,7 @@ mod tests {
 
     use crate::model::git::RepoIdentity;
     use crate::model::scan::Awarded;
-    use crate::model::storage::Event;
+    use crate::model::storage::repo::Event;
 
     /// A model over a throwaway storage root, removed when the test ends.
     struct Harness {
@@ -1004,7 +1004,7 @@ mod tests {
         }
 
         let state = harness.model.state(id).expect("the repo");
-        assert_eq!(state.events.len(), crate::model::storage::MAX_EVENTS);
+        assert_eq!(state.events.len(), crate::model::storage::repo::MAX_EVENTS);
         assert_eq!(state.total_xp, 250);
     }
 
