@@ -18,17 +18,17 @@ pub enum Match {
     New,
 }
 
+/// Whether two histories share a root commit.
+pub fn share_a_root_commit(a: &[String], b: &[String]) -> bool {
+    a.iter().any(|c| b.contains(c))
+}
+
 /// Which state file, if any, the resolved identity belongs to.
 ///
 /// `is_live` answers whether a stored common dir is still on disk. It is a
 /// parameter rather than a `Path::exists` call so the rules test without a
 /// disk, and so the scan worker can publish each path it is about to stat —
 /// any one of these candidates can be the one that hangs.
-/// Whether two histories share a root commit.
-pub fn share_a_root_commit(a: &[String], b: &[String]) -> bool {
-    a.iter().any(|c| b.contains(c))
-}
-
 pub fn match_identity(
     states: &[RepoState],
     identity: &RepoIdentity,
