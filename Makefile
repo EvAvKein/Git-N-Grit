@@ -31,7 +31,7 @@ test:
 
 ci:
 	cargo fmt --check
-	cargo clippy
+	cargo clippy --all-targets -- -D warnings
 	cargo test
 
 fmt:
