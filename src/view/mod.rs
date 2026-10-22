@@ -17,8 +17,8 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// The colours in use. Named ANSI colours only, so the terminal's own theme
-/// decides what they look like. Bold and dim are modifiers, not colours, and
+/// The colors in use. Named ANSI colors only, so the terminal's own theme
+/// decides what they look like. Bold and dim are modifiers, not colors, and
 /// survive `NO_COLOR`.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
@@ -26,7 +26,7 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// Colour unless `NO_COLOR` is set and non-empty, per no-color.org.
+    /// Color unless `NO_COLOR` is set and non-empty, per no-color.org.
     pub fn detect() -> Palette {
         Palette {
             color: std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(left_scroll_top(2, 3, 5), 0); // fewer rows than fit
     }
 
-    fn colours(line: &Line) -> Vec<Option<Color>> {
+    fn colors(line: &Line) -> Vec<Option<Color>> {
         line.spans.iter().map(|span| span.style.fg).collect()
     }
 
@@ -748,7 +748,7 @@ mod tests {
     fn an_inactive_row_carries_a_red_bang_before_its_total() {
         let line = left_row("old/thing", Some(210), true, false, Palette::colored());
         assert_eq!(line.to_string(), "  old/thing ! 210xp");
-        assert!(colours(&line).contains(&Some(Color::Red)));
+        assert!(colors(&line).contains(&Some(Color::Red)));
     }
 
     #[test]
@@ -761,19 +761,19 @@ mod tests {
     fn a_healthy_row_has_no_bang_and_the_selection_is_marked() {
         let line = left_row("dotfiles", Some(380), false, true, Palette::colored());
         assert_eq!(line.to_string(), "> dotfiles 380xp");
-        assert_eq!(colours(&line)[0], Some(Color::Cyan));
+        assert_eq!(colors(&line)[0], Some(Color::Cyan));
     }
 
     #[test]
-    fn the_plain_palette_paints_no_colour_and_keeps_the_dimming() {
+    fn the_plain_palette_paints_no_color_and_keeps_the_dimming() {
         let line = left_row("old/thing", Some(210), true, true, Palette::plain());
-        assert!(colours(&line).iter().all(Option::is_none));
+        assert!(colors(&line).iter().all(Option::is_none));
         assert!(line.spans[1].style.add_modifier.contains(Modifier::DIM));
         assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn gains_are_green_only_with_colour_and_the_text_is_the_same() {
+    fn gains_are_green_only_with_color_and_the_text_is_the_same() {
         let event = Event {
             sha: "a".into(),
             timestamp: 0,
@@ -783,11 +783,11 @@ mod tests {
             xp: 6,
             rewrite: false,
         };
-        let colour = event_stat_line(&event, Palette::colored());
+        let color = event_stat_line(&event, Palette::colored());
         let plain = event_stat_line(&event, Palette::plain());
-        assert_eq!(colour.to_string(), plain.to_string());
-        assert_eq!(colours(&colour).last(), Some(&Some(Color::Green)));
-        assert!(colours(&plain).iter().all(Option::is_none));
+        assert_eq!(color.to_string(), plain.to_string());
+        assert_eq!(colors(&color).last(), Some(&Some(Color::Green)));
+        assert!(colors(&plain).iter().all(Option::is_none));
     }
 
     #[test]
