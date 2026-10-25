@@ -34,6 +34,9 @@ ci:
 	cargo clippy --all-targets -- -D warnings
 	cargo test
 
+githook:
+	chmod +x scripts/pre-push-hook && cp scripts/pre-push-hook .git/hooks/pre-push
+
 fmt:
 	cargo fmt
 
@@ -43,4 +46,4 @@ lint:
 clean:
 	cargo clean
 
-.PHONY: install watch-install build run test fmt lint clean ci
+.PHONY: install watch-install build run test fmt lint clean ci githook
