@@ -133,12 +133,23 @@ impl Repo {
 
     /// The same, authored by somebody else.
     pub fn run_as(&self, author: &str, args: &[&str]) -> String {
-        let out = self
-            .command(args)
-            .env("GIT_AUTHOR_EMAIL", author)
-            .output()
-            .expect("running git");
+        let mut cmd = self.command(args);
+        cmd.env("GIT_AUTHOR_EMAIL", author);
+        Self::output(args, &mut cmd)
+    }
 
+    /// The same, authored and committed at `at`, in Unix seconds.
+    pub fn run_at(&self, author: &str, at: i64, args: &[&str]) -> String {
+        let date = format!("@{at} +0000");
+        let mut cmd = self.command(args);
+        cmd.env("GIT_AUTHOR_EMAIL", author)
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date);
+        Self::output(args, &mut cmd)
+    }
+
+    fn output(args: &[&str], cmd: &mut Command) -> String {
+        let out = cmd.output().expect("running git");
         assert!(
             out.status.success(),
             "git {args:?} failed: {}",
