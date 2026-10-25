@@ -30,9 +30,12 @@ Keep using Git as you usually do: the app only watches the repos you add, and ne
 
 ## XP
 
-Your commits earn 1 XP per line added and 3 XP per line deleted, because deleting code is worth more than writing it.  
-Redoing work you already earned XP for, like amending, rebasing or cherry-picking, earns a flat 2 XP: the work counts once, those cleanups count a little.  
-A commit counts as yours when its author email matches the repo's Git `user.email`.
+Your commits earn XP:
+
+- Deleting code is worth more than writing it: 1 XP per added line, 3 XP per deleted line.
+- Redone work (amends, rebases, cherry-picks) only counts once, and the cleanup earns a flat 2 XP.
+
+A commit is yours when its author email matches the repo's Git `user.email`.
 
 ## Requirements
 
