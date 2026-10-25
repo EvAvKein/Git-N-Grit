@@ -2,7 +2,7 @@
 
 Gamify your software development!
 
-Git-N-Grit is a terminal app that keeps track of your Git commits, turning your work into XP.
+Git-N-Grit is a terminal app that keeps track of your Git commits, turning your work into XP.  
 Keep using Git as you usually do: the app only watches the repos you add, and never changes them.
 
 <!-- preview:start -->
@@ -30,8 +30,8 @@ Keep using Git as you usually do: the app only watches the repos you add, and ne
 
 ## XP
 
-Your commits earn 1 XP per line added and 3 XP per line deleted, because deleting code is worth more than writing it.
-Redoing work you already earned XP for, like amending, rebasing or cherry-picking, earns a flat 2 XP: the work counts once, those cleanups count a little.
+Your commits earn 1 XP per line added and 3 XP per line deleted, because deleting code is worth more than writing it.  
+Redoing work you already earned XP for, like amending, rebasing or cherry-picking, earns a flat 2 XP: the work counts once, those cleanups count a little.  
 A commit counts as yours when its author email matches the repo's Git `user.email`.
 
 ## Requirements
@@ -55,4 +55,4 @@ gng
 gng --storage <path>   # keep Git-N-Grit's data somewhere other than ~/.local/share/git-n-grit
 ```
 
-Design decisions and technical details, like how it keeps a rebase from rewarding the same work twice, are in [docs/DECISIONS.md](docs/DECISIONS.md).
+Technical and design details, like how it keeps a rebase from rewarding the same work twice, can be found in [docs/DECISIONS.md](docs/DECISIONS.md).
