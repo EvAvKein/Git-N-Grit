@@ -1,4 +1,4 @@
-//! `make readme-preview`: draw one frame of the real UI over throwaway repos and
+//! `make update-readme-preview`: draw one frame of the real UI over throwaway repos and
 //! print it as the README's preview block, or with `--write`, put it into the
 //! README between the preview markers.
 

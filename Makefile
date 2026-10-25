@@ -33,13 +33,18 @@ ci:
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 	cargo test
-	$(MAKE) --no-print-directory readme-preview
+	@$(DIFF_README_PREVIEW) || { \
+		echo "README.md's TUI preview is stale; run 'make update-readme-preview' to update it."; exit 1; }
 
-readme-preview:
-	@cargo run --quiet --example generate_readme_preview > target/readme-preview.md
-	@awk '/preview:end/ { p = 0 } p; /preview:start/ { p = 1 }' README.md | \
-		diff -u --color - target/readme-preview.md || { \
-		if [ -n "$$CI" ]; then exit 1; fi; \
+DIFF_README_PREVIEW = cargo run --quiet --example generate_readme_preview > target/readme-preview.md && \
+	awk '/preview:end/ { p = 0 } p; /preview:start/ { p = 1 }' README.md | \
+	diff -u --color - target/readme-preview.md
+
+diff-readme-preview:
+	@$(DIFF_README_PREVIEW)
+
+update-readme-preview:
+	@$(DIFF_README_PREVIEW) || { \
 		printf "\nUpdate README.md's TUI preview? [y/N] " && read -r answer < /dev/tty && \
 		echo "$$answer" | grep -qi '^y' && cargo run --quiet --example generate_readme_preview -- --write; \
 	}
@@ -56,4 +61,4 @@ lint:
 clean:
 	cargo clean
 
-.PHONY: install watch-install build run test fmt lint clean ci githook readme-preview
+.PHONY: install watch-install build run test fmt lint clean ci githook diff-readme-preview update-readme-preview
