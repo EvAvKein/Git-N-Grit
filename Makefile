@@ -33,10 +33,16 @@ ci:
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 	cargo test
-	$(MAKE) --no-print-directory generate-readme-preview
+	$(MAKE) --no-print-directory readme-preview
 
-generate-readme-preview:
-	cargo run --quiet --example generate_readme_preview
+readme-preview:
+	@cargo run --quiet --example generate_readme_preview > target/readme-preview.md
+	@awk '/preview:end/ { p = 0 } p; /preview:start/ { p = 1 }' README.md | \
+		diff -u --color - target/readme-preview.md || { \
+		if [ -n "$$CI" ]; then exit 1; fi; \
+		printf "\nUpdate README.md's TUI preview? [y/N] " && read -r answer < /dev/tty && \
+		echo "$$answer" | grep -qi '^y' && cargo run --quiet --example generate_readme_preview -- --write; \
+	}
 
 githook:
 	chmod +x scripts/pre-push-hook && cp scripts/pre-push-hook .git/hooks/pre-push
@@ -50,4 +56,4 @@ lint:
 clean:
 	cargo clean
 
-.PHONY: install watch-install build run test fmt lint clean ci githook generate-readme-preview
+.PHONY: install watch-install build run test fmt lint clean ci githook readme-preview

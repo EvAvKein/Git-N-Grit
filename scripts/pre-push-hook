@@ -7,8 +7,15 @@ RESET="\033[0m"
 
 echo $CYAN "Running pre-push checks..." $RESET
 
+readme_hash=$(git hash-object README.md)
+
 if ! make ci; then
   echo $RED "Pre-push checks failed. Push aborted. (bypass with 'git push --no-verify')" $RESET
+  exit 1
+fi
+
+if [ "$(git hash-object README.md)" != "$readme_hash" ]; then
+  echo $CYAN "README.md's TUI preview is updated and ready to commit. Push aborted." $RESET
   exit 1
 fi
 

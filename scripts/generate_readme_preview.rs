@@ -1,5 +1,6 @@
-//! `make generate-readme-preview`: draw one frame of the real UI over throwaway
-//! repos and write it into the README between the preview markers.
+//! `make readme-preview`: draw one frame of the real UI over throwaway repos and
+//! print it as the README's preview block, or with `--write`, put it into the
+//! README between the preview markers.
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -26,7 +27,16 @@ const WIDTH: u16 = 80;
 const HEIGHT: u16 = 18;
 
 fn main() -> Result<()> {
+    let write = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => false,
+        [flag] if flag == "--write" => true,
+        _ => bail!("usage: generate_readme_preview [--write]"),
+    };
     let frame = render()?;
+    if !write {
+        print!("{}", block(&frame));
+        return Ok(());
+    }
     let readme = Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
     let text = fs::read_to_string(&readme).context("reading README.md")?;
     fs::write(&readme, splice(&text, &frame)?).context("writing README.md")
@@ -150,7 +160,12 @@ fn splice(readme: &str, frame: &str) -> Result<String> {
     };
     ensure!(start < end, "README.md has {END} before {START}");
     let head = &readme[..start + START.len()];
-    Ok(format!("{head}\n```text\n{frame}\n```\n{}", &readme[end..]))
+    Ok(format!("{head}\n{}{}", block(frame), &readme[end..]))
+}
+
+/// What goes between the markers.
+fn block(frame: &str) -> String {
+    format!("```text\n{frame}\n```\n")
 }
 
 #[cfg(test)]
