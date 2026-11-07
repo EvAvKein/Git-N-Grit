@@ -46,6 +46,8 @@ A commit is yours when its author email matches the repo's Git `user.email`.
 ## Install
 
 ```sh
+git clone https://github.com/EvAvKein/Git-N-Grit.git
+cd Git-N-Grit
 make install
 ```
 
