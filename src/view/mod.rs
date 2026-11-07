@@ -684,9 +684,9 @@ mod tests {
     #[test]
     fn a_collision_extends_only_the_colliding_pair() {
         let (work, old, elsewhere) = (
-            PathBuf::from("/home/eve/work/api"),
-            PathBuf::from("/home/eve/old/api"),
-            PathBuf::from("/home/eve/dotfiles"),
+            PathBuf::from("/home/you/work/api"),
+            PathBuf::from("/home/you/old/api"),
+            PathBuf::from("/home/you/dotfiles"),
         );
         let paths = [work.as_path(), old.as_path(), elsewhere.as_path()];
 
